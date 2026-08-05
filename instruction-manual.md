@@ -410,6 +410,18 @@ If you run CO2, set **DC 6 Role** to **CO2** in Settings, then set the **CO2 Sch
 
 The Settings section sits at the very bottom of the page. It holds the names and roles for every output and float — the things you set once during installation and rarely touch again.
 
+### Firmware updates
+
+Your controller checks for new firmware automatically every few hours and shows the result as **Firmware Update** at the top of this section. Updates are never installed on their own — you decide when.
+
+To update, press **Install Firmware Update**. The controller re-checks, downloads the new version, installs it and restarts. This usually takes a minute or two, after which the control panel reloads by itself.
+
+- **Already up to date?** Pressing the button is harmless — it simply reports that no update is available.
+- **Busy?** The install is refused while a dose or a water change is running, because restarting mid-cycle would interrupt it. Wait for it to finish, or press Cancel on that process, then try again.
+- **Your settings are kept** — schedules, calibration, names and roles all survive the update.
+
+> **Tip** — Update when you are around to check the tank afterwards, rather than last thing at night. The restart is brief, but it is good practice to confirm pumps and heating resume normally.
+
 ### Names
 
 Every output has a **Label**. Changing it renames that output throughout the control panel, so "DC 5" can become "Cooling Fan" and "AC 2" can become "Display Lights". Doser labels also appear as the heading of that doser's own section.
@@ -470,6 +482,10 @@ It can also be a role. Automatic reservoir filling needs DC 4 set to Refill Sole
 ### A doser section says "Not in Use"
 
 That output is currently set to another job. Open Settings and change that output's Role to **Doser**. Its dosing buttons stay inactive until you do.
+
+### The firmware update will not install
+
+The most common reason is that a dose or water change is running — the controller refuses to restart mid-cycle. Wait for it to finish and press the button again. If it reports no update is available, you already have the latest firmware.
 
 ### Dosing volumes are wrong
 
