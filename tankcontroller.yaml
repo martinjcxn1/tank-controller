@@ -1,0 +1,2603 @@
+substitutions:
+  name: tankcontroller
+  friendly_name: "Tank Controller"
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    # All pumps/solenoids off at boot. ONLY the water change survives a reboot:
+    # it's the one process that can leave the tank drained, so it restores in a
+    # paused state and is resumed with "Water Change: Continue". Reservoir fill,
+    # ATO fill and the ATO top-up are all non-restoring — a reboot simply
+    # clears them, so nothing can come back latched or stuck.
+    priority: -100
+    then:
+      - lambda: |-
+          id(dc_out1).turn_off();
+          id(dc_out2).turn_off();
+          id(dc_out4).turn_off();
+          id(dc_out7).turn_off();
+          id(dc_out8).turn_off();
+          if (id(wc_active)) {
+            id(wc_paused) = true;
+            ESP_LOGW("wc", "Reboot during a water change — paused. Press Continue to resume.");
+          }
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+logger:
+  level: INFO
+api:
+  # Default is reboot_timeout: 15min — the device reboots if no API client
+  # (Home Assistant) ever connects. This unit runs standalone off its web
+  # interface, so that watchdog must be disabled or it reboots every 15 min.
+  reboot_timeout: 0s
+ota:
+  - platform: esphome
+  - platform: web_server
+wifi:
+  # No hard-coded network: boots straight into AP mode so WiFi can be selected
+  # via the captive portal. Credentials entered there are stored in flash and
+  # used on subsequent boots.
+  # Default is reboot_timeout: 15min — reboots when not joined to a network.
+  # That would restart the unit every 15 min while it sits in AP mode, so it is
+  # disabled here; the controller must keep running standalone regardless.
+  reboot_timeout: 0s
+  ap:
+    ssid: "${friendly_name}"
+    password: "tankcontroller"
+# Serves the WiFi network-selection / provisioning page when in AP/fallback mode.
+captive_portal:
+mdns:
+  disabled: false
+web_server:
+  version: 3
+  sorting_groups:
+    - id: grp_status
+      name: "Status & Sensors"
+      sorting_weight: 10
+    - id: grp_temp
+      name: "Temperature Control"
+      sorting_weight: 15
+    - id: grp_wc_settings
+      name: "Water Change Settings"
+      sorting_weight: 20
+    - id: grp_wc_schedule
+      name: "Water Change Schedule"
+      sorting_weight: 22
+    - id: grp_ato
+      name: "ATO"
+      sorting_weight: 27
+    - id: grp_ato_solenoid
+      name: "ATO Fill"
+      sorting_weight: 28
+    - id: grp_reservoir
+      name: "Reservoir Fill"
+      sorting_weight: 29
+    - id: grp_dc_outputs
+      name: "DC Outputs"
+      sorting_weight: 40
+    - id: grp_ac_outputs
+      name: "AC Outputs"
+      sorting_weight: 50
+    - id: grp_co2
+      name: "CO2 & Cooling"
+      sorting_weight: 60
+    - id: grp_calibration
+      name: "Calibration"
+      sorting_weight: 70
+    - id: grp_doser3
+      name: "Doser 3"
+      sorting_weight: 80
+    - id: grp_doser4
+      name: "Doser 4"
+      sorting_weight: 81
+    - id: grp_doser5
+      name: "Doser 5"
+      sorting_weight: 82
+    - id: grp_doser6
+      name: "Doser 6"
+      sorting_weight: 83
+    - id: grp_doser7
+      name: "Doser 7"
+      sorting_weight: 84
+    - id: grp_doser8
+      name: "Doser 8"
+      sorting_weight: 85
+    - id: grp_settings
+      name: "Settings"
+      sorting_weight: 90
+i2c:
+  scl: GPIO22
+  sda: GPIO21
+  # Back to 100kHz: the bus is electrically marginal (BSS138 level-shifter gate
+  # fault puts ~3.5V on SDA/SCL) and faster edges provoke lockups. The button
+  # polling that motivated 400kHz is gone now anyway.
+  # scan disabled: probing every address at boot can stall on a flaky bus.
+  scan: false
+  frequency: 100kHz
+mcp23008:
+  - id: control_12v
+    address: 0x20
+# ---- Lid button / LED expanders disabled (hardware not required) ----
+# The MCP23008 'control_12v' above stays: it drives DC outputs 1-8.
+#mcp23017:
+#  - id: lid_buttons
+#    address: 0x22
+#  - id: lid_leds
+#    address: 0x23
+one_wire:
+  - platform: gpio
+    pin: GPIO4
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Africa/Johannesburg
+    servers:
+      - 0.za.pool.ntp.org
+      - pool.ntp.org
+    on_time:
+      # Midnight reset of all "dosed today" flags
+      - seconds: 0
+        minutes: 0
+        hours: 0
+        then:
+          - lambda: |-
+              id(dosed_today_3) = false;
+              id(dosed_today_4) = false;
+              id(dosed_today_5) = false;
+              id(dosed_today_6) = false;
+              id(dosed_today_7) = false;
+              id(dosed_today_8) = false;
+              id(wc_done_today) = false;
+              id(rf_done_today) = false;
+              id(as_done_today) = false;
+    # Whenever SNTP gets a fresh network time, push it into the battery-backed RTC.
+    on_time_sync:
+      then:
+        - ds1307.write_time:
+            id: ds3231_time
+  # Battery-backed RTC (DS3231 @ 0x68, driven by the register-compatible ds1307
+  # platform). Seeds system time at boot when offline and re-reads periodically,
+  # keeping scheduling/dosing/midnight-reset working without WiFi/SNTP. SNTP
+  # overwrites it whenever the network is available.
+  - platform: ds1307
+    id: ds3231_time
+    update_interval: 15min
+  - platform: homeassistant
+    id: hass_time
+globals:
+  - id: hx_offset
+    type: float
+    restore_value: true
+    initial_value: '50535'
+  - id: hx_scale
+    type: float
+    restore_value: true
+    initial_value: '215.42'
+  # ATO runtime tracking (seconds the ATO output has been running this cycle)
+  - id: ato_runtime
+    type: float
+    restore_value: false
+    initial_value: '0'
+  # Manual "Top Up Now" request (one-shot, cleared when full/capped/blocked)
+  - id: ato_topup_now
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # ATO paused by the ATO Stop button (resumable via ATO Continue)
+  - id: ato_paused
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Why the ATO is doing what it's doing. Logged (and shown in ATO Status) only
+  # when it CHANGES, so the log isn't flooded by the 1s loop. -1 = not yet set.
+  - id: ato_reason
+    type: int
+    restore_value: false
+    initial_value: '-1'
+  # Thermostat heat/cool demand (hysteresis state, recomputed each tick)
+  - id: heat_on
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: cool_on
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Water-change state machine (persisted so a change survives a reboot and can
+  # be stopped/continued). wc_active = a change is in progress (incl. paused).
+  - id: wc_active
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: wc_paused
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: wc_drain_done
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: wc_fill_started
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: wc_fill_done
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: wc_clear_seen
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  # Set when a fill must ignore the level sensor as its stop condition (fallback
+  # fill after the level never cleared). Fill is then bounded only by the Water
+  # Level Failsafe and the max fill time.
+  - id: wc_fill_force
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  # NOTE: elapsed counters are deliberately NOT restored. They change every
+  # second, and a restoring global is written to NVS flash on every change —
+  # that caused per-second flash writes (stalls + wear). On reboot the phase
+  # flags below still restore, so a run resumes at the start of its phase.
+  - id: wc_drain_elapsed
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: wc_fill_elapsed
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: wc_delay_elapsed
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: wc_done_today
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Scheduled reservoir fill state (persisted for stop/continue/reboot)
+  - id: rf_active
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: rf_paused
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: rf_elapsed
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: rf_done_today
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Scheduled ATO fill state (persisted for stop/continue/reboot)
+  - id: as_active
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: as_paused
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: as_elapsed
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: as_done_today
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Per-doser "already dosed today" flags
+  - id: dosed_today_3
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: dosed_today_4
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: dosed_today_5
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: dosed_today_6
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: dosed_today_7
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: dosed_today_8
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+number:
+  - platform: template
+    id: ato_max_runtime
+    name: "ATO Max Runtime"
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 30}
+    optimistic: true
+    restore_value: true
+    initial_value: 120
+    min_value: 5
+    max_value: 600
+    step: 5
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: rf_max_runtime
+    name: "Reservoir Fill Max Runtime"
+    web_server: {sorting_group_id: grp_reservoir, sorting_weight: 132}
+    optimistic: true
+    restore_value: true
+    initial_value: 300
+    min_value: 5
+    max_value: 3600
+    step: 5
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: as_max_runtime
+    name: "ATO Fill Max Runtime"
+    web_server: {sorting_group_id: grp_ato_solenoid, sorting_weight: 30}
+    optimistic: true
+    restore_value: true
+    initial_value: 120
+    min_value: 5
+    max_value: 1800
+    step: 5
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: cal_known_weight
+    name: "CO2 Cal: Known Weight"
+    web_server: {sorting_group_id: grp_calibration, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 300
+    min_value: 1
+    max_value: 5000
+    step: 1
+    unit_of_measurement: g
+    mode: box
+  # ---- Per-doser dose volume (mL) — visible in Dosing group ----
+  - platform: template
+    id: dose_ml_3
+    name: "Doser 3 Volume"
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 0
+    max_value: 500
+    step: 0.5
+    unit_of_measurement: mL
+    mode: box
+  - platform: template
+    id: dose_ml_4
+    name: "Doser 4 Volume"
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 0
+    max_value: 500
+    step: 0.5
+    unit_of_measurement: mL
+    mode: box
+  - platform: template
+    id: dose_ml_5
+    name: "Doser 5 Volume"
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 0
+    max_value: 500
+    step: 0.5
+    unit_of_measurement: mL
+    mode: box
+  - platform: template
+    id: dose_ml_6
+    name: "Doser 6 Volume"
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 0
+    max_value: 500
+    step: 0.5
+    unit_of_measurement: mL
+    mode: box
+  - platform: template
+    id: dose_ml_7
+    name: "Doser 7 Volume"
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 0
+    max_value: 500
+    step: 0.5
+    unit_of_measurement: mL
+    mode: box
+  - platform: template
+    id: dose_ml_8
+    name: "Doser 8 Volume"
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 0
+    max_value: 500
+    step: 0.5
+    unit_of_measurement: mL
+    mode: box
+  # ---- Per-doser calibration mL/s — tucked in Calibration group ----
+  - platform: template
+    id: dose_rate_3
+    name: "Doser 3 Rate (mL/s)"
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    initial_value: 1.6
+    min_value: 0.05
+    max_value: 20
+    step: 0.05
+    unit_of_measurement: mL/s
+    mode: box
+  - platform: template
+    id: dose_rate_4
+    name: "Doser 4 Rate (mL/s)"
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    initial_value: 1.6
+    min_value: 0.05
+    max_value: 20
+    step: 0.05
+    unit_of_measurement: mL/s
+    mode: box
+  - platform: template
+    id: dose_rate_5
+    name: "Doser 5 Rate (mL/s)"
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    initial_value: 1.6
+    min_value: 0.05
+    max_value: 20
+    step: 0.05
+    unit_of_measurement: mL/s
+    mode: box
+  - platform: template
+    id: dose_rate_6
+    name: "Doser 6 Rate (mL/s)"
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    initial_value: 1.6
+    min_value: 0.05
+    max_value: 20
+    step: 0.05
+    unit_of_measurement: mL/s
+    mode: box
+  - platform: template
+    id: dose_rate_7
+    name: "Doser 7 Rate (mL/s)"
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    initial_value: 1.6
+    min_value: 0.05
+    max_value: 20
+    step: 0.05
+    unit_of_measurement: mL/s
+    mode: box
+  - platform: template
+    id: dose_rate_8
+    name: "Doser 8 Rate (mL/s)"
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    initial_value: 1.6
+    min_value: 0.05
+    max_value: 20
+    step: 0.05
+    unit_of_measurement: mL/s
+    mode: box
+  # ---- Per-doser fixed-time run (line flushing / rate calibration) ----
+  - platform: template
+    id: flush_seconds_3
+    name: "Doser 3 Flush/Cal Seconds"
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: flush_seconds_4
+    name: "Doser 4 Flush/Cal Seconds"
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: flush_seconds_5
+    name: "Doser 5 Flush/Cal Seconds"
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: flush_seconds_6
+    name: "Doser 6 Flush/Cal Seconds"
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: flush_seconds_7
+    name: "Doser 7 Flush/Cal Seconds"
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: flush_seconds_8
+    name: "Doser 8 Flush/Cal Seconds"
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: s
+    mode: box
+  # ---- Water change ----
+  - platform: template
+    id: wc_drain_seconds
+    name: "Water Change Drain Time"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 40}
+    optimistic: true
+    restore_value: true
+    initial_value: 300
+    min_value: 60
+    max_value: 3600
+    step: 1
+    unit_of_measurement: s
+    mode: box
+  - platform: template
+    id: wc_fill_ratio
+    name: "Water Change Fill Ratio"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 50}
+    optimistic: true
+    restore_value: true
+    initial_value: 1.5
+    min_value: 0.5
+    max_value: 5
+    step: 0.1
+    mode: box
+text:
+  - platform: template
+    name: "AC 1 Label"
+    id: ac_1_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 10}
+    optimistic: true
+    restore_value: true
+    initial_value: "AC 1"
+    mode: text
+  - platform: template
+    name: "AC 2 Label"
+    id: ac_2_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: "AC 2"
+    mode: text
+  - platform: template
+    name: "AC 3 Label"
+    id: ac_3_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 30}
+    optimistic: true
+    restore_value: true
+    initial_value: "AC 3"
+    mode: text
+  - platform: template
+    name: "AC 4 Label"
+    id: ac_4_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 40}
+    optimistic: true
+    restore_value: true
+    initial_value: "AC 4"
+    mode: text
+  # DC output labels
+  - platform: template
+    name: "DC 3 Label"
+    id: dc_3_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 50}
+    optimistic: true
+    restore_value: true
+    initial_value: "Doser 3"
+    mode: text
+  - platform: template
+    name: "DC 4 Label"
+    id: dc_4_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 61}
+    optimistic: true
+    restore_value: true
+    initial_value: "Doser 4"
+    mode: text
+  - platform: template
+    name: "DC 5 Label"
+    id: dc_5_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 71}
+    optimistic: true
+    restore_value: true
+    initial_value: "Output 5"
+    mode: text
+  - platform: template
+    name: "DC 6 Label"
+    id: dc_6_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 81}
+    optimistic: true
+    restore_value: true
+    initial_value: "Output 6"
+    mode: text
+  - platform: template
+    name: "DC 7 Label"
+    id: dc_7_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 91}
+    optimistic: true
+    restore_value: true
+    initial_value: "Output 7"
+    mode: text
+  - platform: template
+    name: "DC 8 Label"
+    id: dc_8_label
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 101}
+    optimistic: true
+    restore_value: true
+    initial_value: "Output 8"
+    mode: text
+select:
+  - platform: template
+    id: ac_1_mode
+    name: "AC 1 Mode"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 11}
+    optimistic: true
+    restore_value: true
+    options: ["Off", "Always On", "Scheduled", "Heater"]
+    initial_option: "Off"
+  - platform: template
+    id: ac_2_mode
+    name: "AC 2 Mode"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 21}
+    optimistic: true
+    restore_value: true
+    options: ["Off", "Always On", "Scheduled", "Heater"]
+    initial_option: "Off"
+  - platform: template
+    id: ac_3_mode
+    name: "AC 3 Mode"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 31}
+    optimistic: true
+    restore_value: true
+    options: ["Off", "Always On", "Scheduled", "Heater"]
+    initial_option: "Off"
+  - platform: template
+    id: ac_4_mode
+    name: "AC 4 Mode"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 41}
+    optimistic: true
+    restore_value: true
+    options: ["Off", "Always On", "Scheduled", "Heater"]
+    initial_option: "Off"
+  # DC 5–8 role selects
+  - platform: template
+    id: dc_5_role
+    name: "DC 5 Role"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    options: ["Doser", "Cooling Fan"]
+    initial_option: "Cooling Fan"
+  - platform: template
+    id: dc_6_role
+    name: "DC 6 Role"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 80}
+    optimistic: true
+    restore_value: true
+    options: ["Doser", "CO2"]
+    initial_option: "CO2"
+  - platform: template
+    id: dc_7_role
+    name: "DC 7 Role"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 90}
+    optimistic: true
+    restore_value: true
+    options: ["Doser", "ATO"]
+    initial_option: "ATO"
+  - platform: template
+    id: dc_8_role
+    name: "DC 8 Role"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 100}
+    optimistic: true
+    restore_value: true
+    options: ["Doser", "ATO Fill"]
+    initial_option: "ATO Fill"
+  # DC4 dual-role: normal doser, or the reservoir refill solenoid.
+  - platform: template
+    id: dc_4_role
+    name: "DC 4 Role"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    options: ["Doser", "Refill Solenoid"]
+    initial_option: "Doser"
+  # ---- Float sensor roles ----
+  # Only three roles currently drive logic: "Reservoir Empty" and "Drainage Full"
+  # stop a water change; "Water Level Failsafe" acts as a redundant high-level
+  # cutoff for the ATO and WC fill. The others are reserved (no action yet).
+  - platform: template
+    id: float_1_role
+    name: "Float 1 Role"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 110}
+    optimistic: true
+    restore_value: true
+    options: ["Reservoir Empty", "ATO Empty", "ATO Full"]
+    initial_option: "Reservoir Empty"
+  - platform: template
+    id: float_2_role
+    name: "Float 2 Role"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 120}
+    optimistic: true
+    restore_value: true
+    options: ["Reservoir Full", "Drainage Full", "Water Level Failsafe"]
+    initial_option: "Reservoir Full"
+datetime:
+  - platform: template
+    id: ac_1_on_time
+    name: "AC 1 Schedule On"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 12}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "08:00:00"
+  - platform: template
+    id: ac_1_off_time
+    name: "AC 1 Schedule Off"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 13}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "20:00:00"
+  - platform: template
+    id: ac_2_on_time
+    name: "AC 2 Schedule On"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 22}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "08:00:00"
+  - platform: template
+    id: ac_2_off_time
+    name: "AC 2 Schedule Off"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 23}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "20:00:00"
+  - platform: template
+    id: ac_3_on_time
+    name: "AC 3 Schedule On"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 32}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "08:00:00"
+  - platform: template
+    id: ac_3_off_time
+    name: "AC 3 Schedule Off"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 33}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "20:00:00"
+  - platform: template
+    id: ac_4_on_time
+    name: "AC 4 Schedule On"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 42}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "08:00:00"
+  - platform: template
+    id: ac_4_off_time
+    name: "AC 4 Schedule Off"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 43}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "20:00:00"
+  # CO2 schedule (for whichever DC output is set to CO2)
+  - platform: template
+    id: co2_on_time
+    name: "CO2 Schedule On"
+    web_server: {sorting_group_id: grp_co2, sorting_weight: 10}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "08:00:00"
+  - platform: template
+    id: co2_off_time
+    name: "CO2 Schedule Off"
+    web_server: {sorting_group_id: grp_co2, sorting_weight: 11}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "18:00:00"
+  # Per-doser dose times
+  - platform: template
+    id: dose_time_3
+    name: "Doser 3 Time"
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 10}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "09:00:00"
+  - platform: template
+    id: dose_time_4
+    name: "Doser 4 Time"
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 10}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "09:05:00"
+  - platform: template
+    id: dose_time_5
+    name: "Doser 5 Time"
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 10}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "09:10:00"
+  - platform: template
+    id: dose_time_6
+    name: "Doser 6 Time"
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 10}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "09:15:00"
+  - platform: template
+    id: dose_time_7
+    name: "Doser 7 Time"
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 10}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "09:20:00"
+  - platform: template
+    id: dose_time_8
+    name: "Doser 8 Time"
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 10}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "09:25:00"
+  # Water change scheduled time
+  - platform: template
+    id: wc_time
+    name: "Water Change Time"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 20}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "10:00:00"
+  # Reservoir fill scheduled time
+  - platform: template
+    id: rf_time
+    name: "Reservoir Fill Time"
+    web_server: {sorting_group_id: grp_reservoir, sorting_weight: 131}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "06:00:00"
+  # ATO fill scheduled time
+  - platform: template
+    id: as_time
+    name: "ATO Fill Time"
+    web_server: {sorting_group_id: grp_ato_solenoid, sorting_weight: 20}
+    type: time
+    optimistic: true
+    restore_value: true
+    initial_value: "07:00:00"
+switch:
+  - platform: gpio
+    pin: GPIO23
+    id: heartbeat_pin
+    name: "Heartbeat"
+    internal: true
+    restore_mode: ALWAYS_OFF
+  - platform: gpio
+    name: "Drainage Pump"
+    id: dc_out1
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 10}
+    pin: {mcp23xxx: control_12v, number: 7, mode: {output: true}, inverted: false}
+  - platform: gpio
+    name: "Filling Pump"
+    id: dc_out2
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 20}
+    pin: {mcp23xxx: control_12v, number: 6, mode: {output: true}, inverted: false}
+  - platform: gpio
+    name: "Doser 3"
+    id: dc_out3
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 30}
+    pin: {mcp23xxx: control_12v, number: 5, mode: {output: true}, inverted: false}
+  - platform: gpio
+    name: "Doser 4"
+    id: dc_out4
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 30}
+    pin: {mcp23xxx: control_12v, number: 4, mode: {output: true}, inverted: false}
+  - platform: gpio
+    name: "Output 5"
+    id: dc_out5
+    web_server: {sorting_group_id: grp_dc_outputs, sorting_weight: 10}
+    pin: {mcp23xxx: control_12v, number: 3, mode: {output: true}, inverted: false}
+  - platform: gpio
+    name: "Output 6"
+    id: dc_out6
+    web_server: {sorting_group_id: grp_dc_outputs, sorting_weight: 20}
+    pin: {mcp23xxx: control_12v, number: 2, mode: {output: true}, inverted: false}
+  - platform: gpio
+    name: "Output 7"
+    id: dc_out7
+    web_server: {sorting_group_id: grp_dc_outputs, sorting_weight: 30}
+    pin: {mcp23xxx: control_12v, number: 1, mode: {output: true}, inverted: false}
+  - platform: gpio
+    name: "Output 8"
+    id: dc_out8
+    web_server: {sorting_group_id: grp_dc_outputs, sorting_weight: 40}
+    pin: {mcp23xxx: control_12v, number: 0, mode: {output: true}, inverted: false}
+  - platform: gpio
+    id: AC_1
+    name: "AC_1"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 14}
+    pin: {number: GPIO16, mode: {output: true}}
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: gpio
+    id: AC_2
+    name: "AC_2"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 24}
+    pin: {number: GPIO17, mode: {output: true}}
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: gpio
+    id: AC_3
+    name: "AC_3"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 34}
+    pin: {number: GPIO18, mode: {output: true}}
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: gpio
+    id: AC_4
+    name: "AC_4"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 44}
+    pin: {number: GPIO19, mode: {output: true}}
+    restore_mode: RESTORE_DEFAULT_OFF
+  # ---- Lid LEDs disabled (expander commented out above) ----
+#  - platform: gpio
+#    name: led1
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 0, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led2
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 1, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led3
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 2, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led4
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 3, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led5
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 4, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led6
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 5, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led7
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 6, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led8
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 7, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led9
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 8, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led10
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 9, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led11
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 10, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led12
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 11, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led13
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 12, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led14
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 13, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led15
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 14, mode: {output: true}, inverted: false}
+#  - platform: gpio
+#    name: led16
+#    internal: true
+#    pin: {mcp23xxx: lid_leds, number: 15, mode: {output: true}, inverted: false}
+  # ---- Water change: master enable + per-day selectors ----
+  - platform: template
+    id: wc_enable
+    name: "Scheduled Water Change"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 10}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_mon
+    name: "Water Change: Monday"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 30}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_tue
+    name: "Water Change: Tuesday"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 31}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_wed
+    name: "Water Change: Wednesday"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 32}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_thu
+    name: "Water Change: Thursday"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 33}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_fri
+    name: "Water Change: Friday"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 34}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_sat
+    name: "Water Change: Saturday"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 35}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_sun
+    name: "Water Change: Sunday"
+    web_server: {sorting_group_id: grp_wc_schedule, sorting_weight: 36}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: wc_simultaneous
+    name: "Simultaneous WC"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 70}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: rf_enable
+    name: "Scheduled Reservoir Fill"
+    web_server: {sorting_group_id: grp_reservoir, sorting_weight: 130}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: as_enable
+    name: "Scheduled ATO Fill"
+    web_server: {sorting_group_id: grp_ato_solenoid, sorting_weight: 10}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  # Salt Water mode. ON: ATO tops up via DC7 (when DC7 role is ATO) — fresh-water
+  # top-off for a marine tank. OFF: ATO tops up via the Filling Pump regardless of
+  # DC7's role (fresh-water tank).
+  - platform: template
+    id: salt_water
+    name: "Salt Water"
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 10}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  # Master enable for the ATO (auto top-off). Off = no automatic top-up.
+  - platform: template
+    id: ato_enable
+    name: "ATO Enabled"
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 20}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+  # ---- Outputs to force off during a water change (simultaneous or not) ----
+  - platform: template
+    id: ac1_off_wc
+    name: "AC 1 Off During WC"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 15}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: ac2_off_wc
+    name: "AC 2 Off During WC"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 25}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: ac3_off_wc
+    name: "AC 3 Off During WC"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 35}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: ac4_off_wc
+    name: "AC 4 Off During WC"
+    web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 45}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: dc6_off_wc
+    name: "DC 6 Off During WC"
+    web_server: {sorting_group_id: grp_dc_outputs, sorting_weight: 21}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+  - platform: template
+    id: dc8_off_wc
+    name: "DC 8 Off During WC"
+    web_server: {sorting_group_id: grp_dc_outputs, sorting_weight: 41}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+button:
+  - platform: template
+    name: "CO2 Cal: Tare (Zero)"
+    web_server: {sorting_group_id: grp_calibration, sorting_weight: 30}
+    on_press:
+      - lambda: |-
+          id(hx_offset) = id(co2_raw).state;
+          ESP_LOGI("cal", "Tare set. offset=%.1f", id(hx_offset));
+  - platform: template
+    name: "CO2 Cal: Set Scale from Known Weight"
+    web_server: {sorting_group_id: grp_calibration, sorting_weight: 40}
+    on_press:
+      - lambda: |-
+          float raw = id(co2_raw).state;
+          float w = id(cal_known_weight).state;
+          if (!isnan(raw) && w > 0) {
+            float new_scale = (raw - id(hx_offset)) / w;
+            if (new_scale != 0) {
+              id(hx_scale) = new_scale;
+              ESP_LOGI("cal", "Scale set. scale=%.3f counts/g", id(hx_scale));
+            }
+          }
+  # Manual dose-now buttons (run the doser's configured volume immediately).
+  # Dosers 3 & 4 are always dosers. Dosers 5–8 are dual-role, so their
+  # Dose Now button only fires when the output is actually in "Doser" role.
+  - platform: template
+    name: "Doser 3 Dose Now"
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 40}
+    on_press:
+      - script.execute: {id: run_doser, sw: 3}
+  - platform: template
+    name: "Doser 4 Dose Now"
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 40}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_4_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: run_doser, sw: 4}
+          else:
+            - logger.log: "Doser 4 ignored: output in Refill Solenoid role"
+  - platform: template
+    name: "Doser 5 Dose Now"
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 40}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_5_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: run_doser, sw: 5}
+          else:
+            - logger.log: "Doser 5 ignored: output not in Doser role"
+  - platform: template
+    name: "Doser 6 Dose Now"
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 40}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_6_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: run_doser, sw: 6}
+          else:
+            - logger.log: "Doser 6 ignored: output not in Doser role"
+  - platform: template
+    name: "Doser 7 Dose Now"
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 40}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_7_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: run_doser, sw: 7}
+          else:
+            - logger.log: "Doser 7 ignored: output in ATO role"
+  - platform: template
+    name: "Doser 8 Dose Now"
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 40}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_8_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: run_doser, sw: 8}
+          else:
+            - logger.log: "Doser 8 ignored: output in ATO Fill role"
+  # Fixed-time run buttons — run the doser for exactly "Doser Flush/Cal Seconds"
+  # (1–60s). Used for flushing lines or timing output to calibrate mL/s.
+  # Dosers 3 & 4 always run; 5–8 only run when the output is in Doser role.
+  - platform: template
+    name: "Doser 3 Flush/Run"
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 80}
+    on_press:
+      - script.execute: {id: flush_doser, sw: 3}
+  - platform: template
+    name: "Doser 4 Flush/Run"
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 80}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_4_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: flush_doser, sw: 4}
+          else:
+            - logger.log: "Doser 4 flush ignored: output in Refill Solenoid role"
+  - platform: template
+    name: "Doser 5 Flush/Run"
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 80}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_5_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: flush_doser, sw: 5}
+          else:
+            - logger.log: "Doser 5 flush ignored: output not in Doser role"
+  - platform: template
+    name: "Doser 6 Flush/Run"
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 80}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_6_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: flush_doser, sw: 6}
+          else:
+            - logger.log: "Doser 6 flush ignored: output not in Doser role"
+  - platform: template
+    name: "Doser 7 Flush/Run"
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 80}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_7_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: flush_doser, sw: 7}
+          else:
+            - logger.log: "Doser 7 flush ignored: output in ATO role"
+  - platform: template
+    name: "Doser 8 Flush/Run"
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 80}
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(dc_8_role).current_option() == "Doser";'
+          then:
+            - script.execute: {id: flush_doser, sw: 8}
+          else:
+            - logger.log: "Doser 8 flush ignored: output in ATO Fill role"
+  # Manual Stop Now — immediately turn the output off and cancel any pending
+  # dose/flush off-timer. Works regardless of role (the 1s control loop will
+  # re-drive ATO/CO2/Fan outputs on the next tick if their conditions demand).
+  - platform: template
+    name: "Doser 3 Stop Now"
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 50}
+    on_press:
+      - script.execute: {id: stop_doser, sw: 3}
+  - platform: template
+    name: "Doser 4 Stop Now"
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 50}
+    on_press:
+      - script.execute: {id: stop_doser, sw: 4}
+  - platform: template
+    name: "Doser 5 Stop Now"
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 50}
+    on_press:
+      - script.execute: {id: stop_doser, sw: 5}
+  - platform: template
+    name: "Doser 6 Stop Now"
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 50}
+    on_press:
+      - script.execute: {id: stop_doser, sw: 6}
+  - platform: template
+    name: "Doser 7 Stop Now"
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 50}
+    on_press:
+      - script.execute: {id: stop_doser, sw: 7}
+  - platform: template
+    name: "Doser 8 Stop Now"
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 50}
+    on_press:
+      - script.execute: {id: stop_doser, sw: 8}
+  # ---- Water change manual controls ----
+  - platform: template
+    name: "Water Change: Start Now"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 80}
+    on_press:
+      - script.execute: wc_begin
+  # Stop = pause: freeze the change (pumps off) but keep all progress so it can
+  # be resumed. A leak detection presses this automatically (see 1s loop).
+  - platform: template
+    name: "Water Change: Stop"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 81}
+    on_press:
+      - lambda: |-
+          if (id(wc_active)) {
+            id(wc_paused) = true;
+            id(dc_out1).turn_off();
+            id(dc_out2).turn_off();
+            ESP_LOGW("wc", "Water change stopped (paused) by user");
+          } else {
+            ESP_LOGI("wc", "Stop ignored: no change in progress");
+          }
+  # Continue = resume a stopped change from where it left off. Refused if a leak
+  # is still present.
+  - platform: template
+    name: "Water Change: Continue"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 82}
+    on_press:
+      - lambda: |-
+          if (!id(wc_active)) { ESP_LOGI("wc", "Continue ignored: no change in progress"); return; }
+          if (!id(wc_paused)) { ESP_LOGI("wc", "Continue ignored: change not stopped"); return; }
+          if (id(leak_sensor).state) { ESP_LOGW("wc", "Continue refused: leak still present"); return; }
+          id(wc_paused) = false;
+          ESP_LOGI("wc", "Water change resumed");
+  # Fill Only / Drain Only: run just one leg of the water change through the same
+  # state machine, so the WC Stop / Continue / Cancel buttons work with them too.
+  - platform: template
+    name: "Water Change: Fill Only"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 83}
+    on_press:
+      - lambda: |-
+          if (id(leak_sensor).state) { ESP_LOGW("wc", "Fill Only refused: leak detected"); return; }
+          if (id(wc_active) && !id(wc_paused)) { ESP_LOGW("wc", "Fill Only ignored: change already running"); return; }
+          id(wc_drain_elapsed) = 0; id(wc_fill_elapsed) = 0; id(wc_delay_elapsed) = 0;
+          id(wc_drain_done)   = true;    // skip drain
+          id(wc_clear_seen)   = true;
+          id(wc_fill_force)   = false;
+          id(wc_fill_started) = true;    // start filling immediately
+          id(wc_fill_done)    = false;
+          id(wc_paused)       = false;
+          id(wc_active)       = true;
+          ESP_LOGI("wc", "Water change: fill only started");
+  - platform: template
+    name: "Water Change: Drain Only"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 84}
+    on_press:
+      - lambda: |-
+          if (id(leak_sensor).state) { ESP_LOGW("wc", "Drain Only refused: leak detected"); return; }
+          if (id(wc_active) && !id(wc_paused)) { ESP_LOGW("wc", "Drain Only ignored: change already running"); return; }
+          id(wc_drain_elapsed) = 0; id(wc_fill_elapsed) = 0; id(wc_delay_elapsed) = 0;
+          id(wc_drain_done)   = false;   // run drain
+          id(wc_clear_seen)   = false;
+          id(wc_fill_force)   = false;
+          id(wc_fill_started) = false;
+          id(wc_fill_done)    = true;    // skip fill
+          id(wc_paused)       = false;
+          id(wc_active)       = true;
+          ESP_LOGI("wc", "Water change: drain only started");
+  # Cancel = clear all water-change state (both pumps off) so it can be restarted.
+  - platform: template
+    name: "Water Change: Cancel"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 85}
+    on_press:
+      - lambda: |-
+          id(wc_active) = false; id(wc_paused) = false;
+          id(wc_drain_done) = false; id(wc_fill_started) = false; id(wc_fill_done) = false;
+          id(wc_clear_seen) = false; id(wc_fill_force) = false;
+          id(wc_drain_elapsed) = 0; id(wc_fill_elapsed) = 0; id(wc_delay_elapsed) = 0;
+          id(dc_out1).turn_off(); id(dc_out2).turn_off();
+          ESP_LOGW("wc", "Water change cancelled/cleared");
+  # ---- Reservoir fill manual controls ----
+  - platform: template
+    name: "Reservoir Fill: Start Now"
+    web_server: {sorting_group_id: grp_reservoir, sorting_weight: 140}
+    on_press:
+      - script.execute: rf_begin
+  - platform: template
+    name: "Reservoir Fill: Stop"
+    web_server: {sorting_group_id: grp_reservoir, sorting_weight: 141}
+    on_press:
+      - lambda: |-
+          if (id(rf_active)) {
+            id(rf_paused) = true;
+            id(dc_out4).turn_off();
+            ESP_LOGW("rf", "Reservoir fill stopped (paused) by user");
+          } else {
+            ESP_LOGI("rf", "Stop ignored: no reservoir fill in progress");
+          }
+  - platform: template
+    name: "Reservoir Fill: Continue"
+    web_server: {sorting_group_id: grp_reservoir, sorting_weight: 142}
+    on_press:
+      - lambda: |-
+          if (!id(rf_active)) { ESP_LOGI("rf", "Continue ignored: no reservoir fill in progress"); return; }
+          if (!id(rf_paused)) { ESP_LOGI("rf", "Continue ignored: not stopped"); return; }
+          if (id(leak_sensor).state) { ESP_LOGW("rf", "Continue refused: leak still present"); return; }
+          id(rf_paused) = false;
+          ESP_LOGI("rf", "Reservoir fill resumed");
+  # Cancel = clear all reservoir-fill state (solenoid off) so it can be restarted.
+  - platform: template
+    name: "Reservoir Fill: Cancel"
+    web_server: {sorting_group_id: grp_reservoir, sorting_weight: 143}
+    on_press:
+      - lambda: |-
+          id(rf_active) = false; id(rf_paused) = false; id(rf_elapsed) = 0;
+          id(dc_out4).turn_off();
+          ESP_LOGW("rf", "Reservoir fill cancelled/cleared");
+  # ---- ATO fill manual controls ----
+  - platform: template
+    name: "ATO Fill: Start Now"
+    web_server: {sorting_group_id: grp_ato_solenoid, sorting_weight: 40}
+    on_press:
+      - script.execute: as_begin
+  - platform: template
+    name: "ATO Fill: Stop"
+    web_server: {sorting_group_id: grp_ato_solenoid, sorting_weight: 50}
+    on_press:
+      - lambda: |-
+          if (id(as_active)) {
+            id(as_paused) = true;
+            id(dc_out8).turn_off();
+            ESP_LOGW("as", "ATO fill stopped (paused) by user");
+          } else {
+            ESP_LOGI("as", "Stop ignored: no ATO fill in progress");
+          }
+  - platform: template
+    name: "ATO Fill: Continue"
+    web_server: {sorting_group_id: grp_ato_solenoid, sorting_weight: 60}
+    on_press:
+      - lambda: |-
+          if (!id(as_active)) { ESP_LOGI("as", "Continue ignored: no ATO fill in progress"); return; }
+          if (!id(as_paused)) { ESP_LOGI("as", "Continue ignored: not stopped"); return; }
+          if (id(leak_sensor).state) { ESP_LOGW("as", "Continue refused: leak still present"); return; }
+          id(as_paused) = false;
+          ESP_LOGI("as", "ATO fill resumed");
+  # Cancel = clear all ATO-solenoid state (solenoid off) so it can be restarted.
+  - platform: template
+    name: "ATO Fill: Cancel"
+    web_server: {sorting_group_id: grp_ato_solenoid, sorting_weight: 70}
+    on_press:
+      - lambda: |-
+          id(as_active) = false; id(as_paused) = false; id(as_elapsed) = 0;
+          id(dc_out8).turn_off();
+          ESP_LOGW("as", "ATO fill cancelled/cleared");
+  # ---- ATO manual top-up ----
+  # Runs one top-up cycle even if ATO Enabled is off; stops at full or max
+  # runtime, and does nothing if the tank already reads full.
+  - platform: template
+    name: "ATO: Top Up Now"
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 50}
+    on_press:
+      - lambda: |-
+          if (id(salt_water).state && id(dc_7_role).current_option() != "ATO") {
+            ESP_LOGI("ato", "Top Up Now ignored: DC7 not in ATO role"); return;
+          }
+          id(ato_paused) = false;      // a manual top-up clears an ATO pause
+          id(ato_runtime) = 0;         // fresh allowance: clears a latched max-runtime cap
+          id(ato_topup_now) = true;
+          ESP_LOGI("ato", "Manual top-up requested");
+  # ATO Stop / Continue: pause / resume the continuous auto top-off.
+  - platform: template
+    name: "ATO: Stop"
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 60}
+    on_press:
+      - lambda: |-
+          id(ato_paused) = true;
+          id(ato_topup_now) = false;
+          ESP_LOGW("ato", "ATO stopped (paused) by user");
+  - platform: template
+    name: "ATO: Continue"
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 70}
+    on_press:
+      - lambda: |-
+          id(ato_paused) = false;
+          id(ato_runtime) = 0;         // fresh allowance: clears a latched max-runtime cap
+          ESP_LOGI("ato", "ATO resumed");
+  # Cancel = clear all ATO state (pause, pending manual top-up, runtime cap) and
+  # switch its output off, so a hung/latched top-up can be restarted cleanly.
+  - platform: template
+    name: "ATO: Cancel"
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 80}
+    on_press:
+      - lambda: |-
+          // Clear the latched runtime cap and any pending manual top-up, and leave
+          // the ATO STOPPED (press Continue or Top Up Now to re-enable). Deliberately
+          // does no I2C here: the control loop switches the output off on its next
+          // tick, and leaving it paused stops it immediately re-arming.
+          id(ato_topup_now) = false;
+          id(ato_runtime)   = 0;
+          id(ato_paused)    = true;
+          ESP_LOGW("ato", "ATO cancelled and cleared — press Continue to re-enable");
+script:
+  # Single parameterised doser script. Computes run time = volume / rate,
+  # clamps to 300s, turns the matching output on then schedules its off.
+  # FIX #3: each doser schedules its OFF against its OWN switch component
+  # with a UNIQUE timeout key, so overlapping doses can't cancel each
+  # other's shutoff (previously all used dc_out3 + key "dose_off").
+  - id: run_doser
+    parameters:
+      sw: int
+    then:
+      - lambda: |-
+          float vol = 0, rate = 1;
+          switch (sw) {
+            case 3: vol = id(dose_ml_3).state; rate = id(dose_rate_3).state; break;
+            case 4: vol = id(dose_ml_4).state; rate = id(dose_rate_4).state; break;
+            case 5: vol = id(dose_ml_5).state; rate = id(dose_rate_5).state; break;
+            case 6: vol = id(dose_ml_6).state; rate = id(dose_rate_6).state; break;
+            case 7: vol = id(dose_ml_7).state; rate = id(dose_rate_7).state; break;
+            case 8: vol = id(dose_ml_8).state; rate = id(dose_rate_8).state; break;
+          }
+          if (rate <= 0) rate = 1;
+          float secs = vol / rate;
+          if (secs > 300) secs = 300;   // hard safety cap
+          if (secs <= 0) return;
+          ESP_LOGI("dose", "Doser %d: %.1f mL @ %.2f mL/s = %.1fs", sw, vol, rate, secs);
+          esphome::switch_::Switch *out = nullptr;
+          switch (sw) {
+            case 3: out = id(dc_out3); break;
+            case 4: out = id(dc_out4); break;
+            case 5: out = id(dc_out5); break;
+            case 6: out = id(dc_out6); break;
+            case 7: out = id(dc_out7); break;
+            case 8: out = id(dc_out8); break;
+          }
+          if (out == nullptr) return;
+          out->turn_on();
+          auto f = [out]() { out->turn_off(); };
+          std::string key = "dose_off_" + std::to_string(sw);
+          App.scheduler.set_timeout((Component*)out, key.c_str(), (uint32_t)(secs * 1000), f);
+  # Fixed-time doser run for flushing / calibration. Runs the matching output
+  # for exactly that doser's own Flush/Cal Seconds (clamped 1–60), then off.
+  # Shares the per-output "dose_off_<sw>" timeout key so it and a normal dose
+  # can never leave an output stuck on.
+  - id: flush_doser
+    parameters:
+      sw: int
+    then:
+      - lambda: |-
+          float secs = 10;
+          switch (sw) {
+            case 3: secs = id(flush_seconds_3).state; break;
+            case 4: secs = id(flush_seconds_4).state; break;
+            case 5: secs = id(flush_seconds_5).state; break;
+            case 6: secs = id(flush_seconds_6).state; break;
+            case 7: secs = id(flush_seconds_7).state; break;
+            case 8: secs = id(flush_seconds_8).state; break;
+          }
+          if (secs < 1) secs = 1;
+          if (secs > 60) secs = 60;
+          esphome::switch_::Switch *out = nullptr;
+          switch (sw) {
+            case 3: out = id(dc_out3); break;
+            case 4: out = id(dc_out4); break;
+            case 5: out = id(dc_out5); break;
+            case 6: out = id(dc_out6); break;
+            case 7: out = id(dc_out7); break;
+            case 8: out = id(dc_out8); break;
+          }
+          if (out == nullptr) return;
+          ESP_LOGI("flush", "Doser %d: fixed run %.0fs", sw, secs);
+          out->turn_on();
+          auto f = [out]() { out->turn_off(); };
+          std::string key = "dose_off_" + std::to_string(sw);
+          App.scheduler.set_timeout((Component*)out, key.c_str(), (uint32_t)(secs * 1000), f);
+  # Manual stop: cancel the pending off-timer and turn the output off now.
+  - id: stop_doser
+    parameters:
+      sw: int
+    then:
+      - lambda: |-
+          esphome::switch_::Switch *out = nullptr;
+          switch (sw) {
+            case 3: out = id(dc_out3); break;
+            case 4: out = id(dc_out4); break;
+            case 5: out = id(dc_out5); break;
+            case 6: out = id(dc_out6); break;
+            case 7: out = id(dc_out7); break;
+            case 8: out = id(dc_out8); break;
+          }
+          if (out == nullptr) return;
+          std::string key = "dose_off_" + std::to_string(sw);
+          App.scheduler.cancel_timeout((Component*)out, key.c_str());
+          out->turn_off();
+          ESP_LOGI("dose", "Doser %d stopped manually", sw);
+  # ===== Water change: begin a run =====
+  # The actual drain/fill sequencing lives in the 1s control loop (a persisted
+  # state machine) so it can be stopped, continued, and survive a reboot. This
+  # script just (re)initialises the state and arms it. Refused on an active leak.
+  - id: wc_begin
+    then:
+      - lambda: |-
+          if (id(leak_sensor).state) { ESP_LOGW("wc", "Start refused: leak detected"); return; }
+          if (id(wc_active) && !id(wc_paused)) { ESP_LOGW("wc", "Start ignored: already running"); return; }
+          id(wc_drain_elapsed) = 0;
+          id(wc_fill_elapsed)  = 0;
+          id(wc_delay_elapsed) = 0;
+          id(wc_drain_done)    = false;
+          id(wc_fill_started)  = false;
+          id(wc_fill_done)     = false;
+          id(wc_clear_seen)    = false;
+          id(wc_fill_force)    = false;
+          id(wc_paused)        = false;
+          id(wc_active)        = true;
+          ESP_LOGI("wc", "Water change started");
+  # ===== Reservoir fill: begin a run =====
+  # Refused unless the prerequisites hold: Float 2 = Reservoir Full, DC4 = Refill
+  # Solenoid, and no leak. The 1s loop runs the solenoid until the reservoir
+  # reads full or Reservoir Fill Max Runtime is hit.
+  - id: rf_begin
+    then:
+      - lambda: |-
+          if (id(float_2_role).current_option() != "Reservoir Full") {
+            ESP_LOGW("rf", "Start refused: Float 2 is not set to Reservoir Full"); return;
+          }
+          if (id(dc_4_role).current_option() != "Refill Solenoid") {
+            ESP_LOGW("rf", "Start refused: DC4 is not set to Refill Solenoid"); return;
+          }
+          if (id(leak_sensor).state) {
+            ESP_LOGW("rf", "Start refused: leak detected"); return;
+          }
+          if (id(rf_active) && !id(rf_paused)) {
+            ESP_LOGW("rf", "Start ignored: reservoir fill already running"); return;
+          }
+          id(rf_elapsed) = 0;
+          id(rf_paused)  = false;
+          id(rf_active)  = true;
+          ESP_LOGI("rf", "Reservoir fill started");
+  # ===== ATO fill: begin a run =====
+  # Refused unless DC8 = ATO Fill and no leak. The 1s loop opens the solenoid
+  # until the tank reads full (level sensor) or ATO Fill Max Runtime.
+  - id: as_begin
+    then:
+      - lambda: |-
+          if (id(dc_8_role).current_option() != "ATO Fill") {
+            ESP_LOGW("as", "Start refused: DC8 is not set to ATO Fill"); return;
+          }
+          if (id(float_1_role).current_option() != "ATO Full") {
+            ESP_LOGW("as", "Start refused: Float 1 is not set to ATO Full"); return;
+          }
+          if (id(leak_sensor).state) {
+            ESP_LOGW("as", "Start refused: leak detected"); return;
+          }
+          if (id(as_active) && !id(as_paused)) {
+            ESP_LOGW("as", "Start ignored: ATO fill already running"); return;
+          }
+          id(as_elapsed) = 0;
+          id(as_paused)  = false;
+          id(as_active)  = true;
+          ESP_LOGI("as", "ATO fill started");
+binary_sensor:
+  # ---- Lid buttons temporarily disabled ----
+  # Each of these polls the MCP23017 over I2C every loop iteration (14 reads
+  # per loop), which dominated bus time and hurt responsiveness. Re-enable once
+  # the v2 PCB wires INTA/INTB for interrupt-driven reads.
+#  - platform: gpio
+#    name: button1
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 0, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button2
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 1, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button3
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 2, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button4
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 3, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button5
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 4, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button6
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 5, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button7
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 6, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button8
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 8, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button9
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 9, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button10
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 10, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button11
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 11, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button12
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 12, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button13
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 13, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+#  - platform: gpio
+#    name: button14
+#    internal: true
+#    pin: {mcp23xxx: lid_buttons, number: 14, mode: {input: true, pullup: true}, inverted: true}
+#    filters: [delayed_on: 10ms]
+  - platform: gpio
+    pin: GPIO25
+    id: leak_sensor
+    name: "Leak Detector"
+    web_server: {sorting_group_id: grp_status, sorting_weight: 40}
+    device_class: moisture
+    # Debounce: require 200ms of leak before acting (kills spikes), and 2s clear
+    # before releasing so a flickering leak doesn't rapidly toggle the WC stop.
+    filters:
+      - delayed_on: 200ms
+      - delayed_off: 2s
+  # Raw float pins keep their as-wired polarity (used by the control logic) and
+  # are hidden from the web; the "_display" copies below are what's shown.
+  - platform: gpio
+    pin: GPIO36
+    id: float_1
+    internal: true
+    device_class: moisture
+    filters:
+      - delayed_on: 500ms
+      - delayed_off: 500ms
+  - platform: gpio
+    pin: GPIO39
+    id: float_2
+    internal: true
+    device_class: moisture
+    filters:
+      - delayed_on: 500ms
+      - delayed_off: 500ms
+  # Web display copies. Max/top roles show inverted, so "at the level" reads
+  # Wet/On even though those sensors are wired OFF-when-reached.
+  - platform: template
+    id: float_1_display
+    name: "Float 1"
+    device_class: moisture
+    web_server: {sorting_group_id: grp_status, sorting_weight: 50}
+    lambda: |-
+      // ATO Full is a max sensor (raw OFF = at level) → invert for display.
+      if (id(float_1_role).current_option() == "ATO Full") return !id(float_1).state;
+      // Empty roles (Reservoir Empty / ATO Empty) read raw ON when below → as-is.
+      return id(float_1).state;
+  - platform: template
+    id: float_2_display
+    name: "Float 2"
+    device_class: moisture
+    web_server: {sorting_group_id: grp_status, sorting_weight: 60}
+    lambda: |-
+      // All Float 2 roles are max sensors (raw OFF = at level) → invert for display.
+      return !id(float_2).state;
+  - platform: gpio
+    pin: GPIO34
+    id: water_level
+    internal: true
+    device_class: moisture
+    # Debounce both edges so ripples/splashing can't briefly read "full" and end
+    # a fill early, or "dry" and kick the ATO. 500ms stable either way.
+    filters:
+      - delayed_on: 500ms
+      - delayed_off: 500ms
+  - platform: template
+    id: water_level_display
+    name: "Water Level"
+    device_class: moisture
+    web_server: {sorting_group_id: grp_status, sorting_weight: 70}
+    lambda: |-
+      // Top sensor (raw OFF = at level/full) → invert so "full" reads Wet/On.
+      return !id(water_level).state;
+sensor:
+  - platform: dallas_temp
+    name: "Tank Temperature"
+    id: tank_temperature
+    web_server: {sorting_group_id: grp_status, sorting_weight: 10}
+    update_interval: 30s
+    filters:
+      - filter_out: nan
+  - platform: hx711
+    id: co2_raw
+    name: "CO2 Raw"
+    internal: true
+    dout_pin: GPIO33
+    clk_pin: GPIO32
+    gain: 128
+    update_interval: 1s
+    filters:
+      - median:
+          window_size: 8
+          send_every: 4
+  - platform: template
+    id: co2_weight
+    name: "CO2 Weight"
+    web_server: {sorting_group_id: grp_calibration, sorting_weight: 10}
+    unit_of_measurement: g
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: |-
+      float raw = id(co2_raw).state;
+      if (isnan(raw)) return NAN;
+      return (raw - id(hx_offset)) / id(hx_scale);
+  # Read-only: max fill time = fill_ratio * drain_seconds * 1.1 (flood safety cap)
+  - platform: template
+    id: wc_max_fill_time
+    name: "Water Change Max Fill Time"
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 60}
+    unit_of_measurement: s
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: |-
+      float R = id(wc_fill_ratio).state;
+      float margin = (R < 1.0f) ? 1.0f : 1.1f;   // drop 1.1 safety when fill is faster than drain
+      return R * id(wc_drain_seconds).state * margin;
+text_sensor:
+  # Current ESP date/time (from system clock; SNTP or the DS3231 RTC).
+  - platform: template
+    name: "Date / Time"
+    id: esp_datetime
+    web_server: {sorting_group_id: grp_status, sorting_weight: 5}
+    update_interval: 1s
+    lambda: |-
+      auto t = id(sntp_time).now();
+      if (!t.is_valid()) return std::string("no time");
+      return t.strftime("%Y-%m-%d %H:%M:%S");
+  # ---- Doser name headings ----
+  # Shows that doser's DC label at the top of its group. For channels that share
+  # the output with another function, the name only appears when the channel is
+  # actually set to Doser — otherwise the group reads "Not in Use".
+  - platform: template
+    name: "Doser 3 Name"
+    id: doser_3_name
+    web_server: {sorting_group_id: grp_doser3, sorting_weight: 5}
+    update_interval: 5s
+    lambda: 'return id(dc_3_label).state;'
+  - platform: template
+    name: "Doser 4 Name"
+    id: doser_4_name
+    web_server: {sorting_group_id: grp_doser4, sorting_weight: 5}
+    update_interval: 5s
+    lambda: |-
+      if (id(dc_4_role).current_option() != "Doser") return std::string("Not in Use");
+      return id(dc_4_label).state;
+  - platform: template
+    name: "Doser 5 Name"
+    id: doser_5_name
+    web_server: {sorting_group_id: grp_doser5, sorting_weight: 5}
+    update_interval: 5s
+    lambda: |-
+      if (id(dc_5_role).current_option() != "Doser") return std::string("Not in Use");
+      return id(dc_5_label).state;
+  - platform: template
+    name: "Doser 6 Name"
+    id: doser_6_name
+    web_server: {sorting_group_id: grp_doser6, sorting_weight: 5}
+    update_interval: 5s
+    lambda: |-
+      if (id(dc_6_role).current_option() != "Doser") return std::string("Not in Use");
+      return id(dc_6_label).state;
+  - platform: template
+    name: "Doser 7 Name"
+    id: doser_7_name
+    web_server: {sorting_group_id: grp_doser7, sorting_weight: 5}
+    update_interval: 5s
+    lambda: |-
+      if (id(dc_7_role).current_option() != "Doser") return std::string("Not in Use");
+      return id(dc_7_label).state;
+  - platform: template
+    name: "Doser 8 Name"
+    id: doser_8_name
+    web_server: {sorting_group_id: grp_doser8, sorting_weight: 5}
+    update_interval: 5s
+    lambda: |-
+      if (id(dc_8_role).current_option() != "Doser") return std::string("Not in Use");
+      return id(dc_8_label).state;
+  # Each float's assigned role, shown directly above that float's status so the
+  # reading is readable without cross-referencing the Settings section.
+  - platform: template
+    name: "Float 1 Role"
+    id: float_1_role_display
+    web_server: {sorting_group_id: grp_status, sorting_weight: 49}
+    update_interval: 5s
+    lambda: 'return id(float_1_role).current_option();'
+  - platform: template
+    name: "Float 2 Role"
+    id: float_2_role_display
+    web_server: {sorting_group_id: grp_status, sorting_weight: 59}
+    update_interval: 5s
+    lambda: 'return id(float_2_role).current_option();'
+  # Current water-change phase, why it's paused, and how long each phase has left.
+  - platform: template
+    name: "Water Change Status"
+    id: wc_status
+    web_server: {sorting_group_id: grp_wc_settings, sorting_weight: 30}
+    update_interval: 2s
+    lambda: |-
+      char buf[72];
+      if (!id(wc_active)) return std::string("idle");
+      if (id(wc_paused)) {
+        if (id(leak_sensor).state) return std::string("paused: leak detected");
+        if (id(float_1_role).current_option() == "Reservoir Empty" && id(float_1).state)
+          return std::string("paused: reservoir empty (float 1)");
+        if (id(float_2_role).current_option() == "Drainage Full" && !id(float_2).state)
+          return std::string("paused: drainage full (float 2)");
+        return std::string("paused by user — press Continue");
+      }
+      float R = id(wc_fill_ratio).state;
+      float D = id(wc_drain_seconds).state;
+      bool sim = id(wc_simultaneous).state;
+      if (!id(wc_drain_done)) {
+        snprintf(buf, sizeof(buf), "draining: %d / %d s", (int) id(wc_drain_elapsed), (int) D);
+        return std::string(buf);
+      }
+      if (!id(wc_fill_started)) {
+        if (sim && !id(wc_clear_seen)) return std::string("waiting for level to clear");
+        float delayS = sim ? ((R > 1.0f) ? 10.0f : (D * (1.0f - R))) : 0.0f;
+        int rem = (int) (delayS - id(wc_delay_elapsed));
+        if (rem < 0) rem = 0;
+        snprintf(buf, sizeof(buf), "waiting to fill: %d s left", rem);
+        return std::string(buf);
+      }
+      if (!id(wc_fill_done)) {
+        float maxf = R * D * ((R < 1.0f) ? 1.0f : 1.1f);
+        snprintf(buf, sizeof(buf), "filling: %d / %d s%s", (int) id(wc_fill_elapsed),
+                 (int) maxf, id(wc_fill_force) ? " (timed, no level stop)" : "");
+        return std::string(buf);
+      }
+      return std::string("finishing");
+  # Why the ATO is or isn't running — checks the same conditions, in the same
+  # order, as the ATO block in the control loop.
+  - platform: template
+    name: "ATO Status"
+    id: ato_status
+    web_server: {sorting_group_id: grp_ato, sorting_weight: 40}
+    update_interval: 2s
+    lambda: |-
+      switch (id(ato_reason)) {
+        case 0: return std::string("topping up");
+        case 1: return std::string("idle: DC7 not in ATO role");
+        case 2: return std::string("blocked: water change active");
+        case 3: return std::string("blocked: leak detected");
+        case 4: return std::string("blocked: water level failsafe (float 2)");
+        case 5: return std::string("blocked: ATO source empty (float 1)");
+        case 6: return std::string("stopped by user");
+        case 7: return std::string("idle: tank full");
+        case 8: return std::string("idle: ATO disabled");
+        case 9: return std::string("stopped: max runtime reached");
+      }
+      return std::string("starting up");
+climate:
+  # Native thermostat: owns the heat/cool setpoints + mode and provides the
+  # climate card / HA entity. The actual output switching is done by the 1s loop
+  # (so the adjustable Temperature Deadband and per-channel roles still apply);
+  # these actions only drive the card's action indicator via native hysteresis.
+  - platform: thermostat
+    name: "Tank Thermostat"
+    id: tank_thermostat
+    sensor: tank_temperature
+    web_server: {sorting_group_id: grp_temp, sorting_weight: 1}
+    visual:
+      min_temperature: 15 °C
+      max_temperature: 35 °C
+      temperature_step:
+        target_temperature: 0.5
+        current_temperature: 0.1
+    min_idle_time: 30s
+    min_heating_off_time: 30s
+    min_heating_run_time: 30s
+    min_cooling_off_time: 30s
+    min_cooling_run_time: 30s
+    heat_deadband: 0.3
+    heat_overrun: 0.3
+    cool_deadband: 0.3
+    cool_overrun: 0.3
+    preset:
+      - name: Home
+        mode: heat_cool
+        default_target_temperature_low: 25.0
+        default_target_temperature_high: 28.0
+    default_preset: Home
+    heat_action:
+      - lambda: 'id(heat_on) = true; id(cool_on) = false;'
+    cool_action:
+      - lambda: 'id(cool_on) = true; id(heat_on) = false;'
+    idle_action:
+      - lambda: 'id(heat_on) = false; id(cool_on) = false;'
+    # Enable the dual-setpoint Heat/Cool mode in the selector (needs both actions).
+    heat_cool_mode: true
+interval:
+  - interval: 750ms
+    then:
+      - switch.toggle: heartbeat_pin
+  # ---- AC + DC role control ----
+  - interval: 1s
+    then:
+      - lambda: |-
+          auto in_window = [](int on_h, int on_m, int off_h, int off_m) -> bool {
+            auto now = id(sntp_time).now();
+            if (!now.is_valid()) return false;
+            int cur = now.hour * 60 + now.minute;
+            int on  = on_h * 60 + on_m;
+            int off = off_h * 60 + off_m;
+            if (on <= off) return cur >= on && cur < off;
+            else return cur >= on || cur < off;
+          };
+          // The thermostat (climate entity) sets heat_on / cool_on via its heat,
+          // cool and idle actions, using its native 0.3 deadband. The loop just
+          // applies those flags to the dynamic outputs below. Safety net: if the
+          // temperature reading is invalid, force both off regardless.
+          if (isnan(id(tank_temperature).state)) {
+            id(heat_on) = false;
+            id(cool_on) = false;
+          }
+          // ===== AC channels =====
+          {
+            std::string m = id(ac_1_mode).current_option();
+            if (m == "Off") id(AC_1).turn_off();
+            else if (m == "Always On") id(AC_1).turn_on();
+            else if (m == "Scheduled") {
+              auto on = id(ac_1_on_time).state_as_esptime();
+              auto off = id(ac_1_off_time).state_as_esptime();
+              if (in_window(on.hour, on.minute, off.hour, off.minute)) id(AC_1).turn_on();
+              else id(AC_1).turn_off();
+            }
+            else if (m == "Heater") {
+              if (id(heat_on)) id(AC_1).turn_on(); else id(AC_1).turn_off();
+            }
+          }
+          {
+            std::string m = id(ac_2_mode).current_option();
+            if (m == "Off") id(AC_2).turn_off();
+            else if (m == "Always On") id(AC_2).turn_on();
+            else if (m == "Scheduled") {
+              auto on = id(ac_2_on_time).state_as_esptime();
+              auto off = id(ac_2_off_time).state_as_esptime();
+              if (in_window(on.hour, on.minute, off.hour, off.minute)) id(AC_2).turn_on();
+              else id(AC_2).turn_off();
+            }
+            else if (m == "Heater") {
+              if (id(heat_on)) id(AC_2).turn_on(); else id(AC_2).turn_off();
+            }
+          }
+          {
+            std::string m = id(ac_3_mode).current_option();
+            if (m == "Off") id(AC_3).turn_off();
+            else if (m == "Always On") id(AC_3).turn_on();
+            else if (m == "Scheduled") {
+              auto on = id(ac_3_on_time).state_as_esptime();
+              auto off = id(ac_3_off_time).state_as_esptime();
+              if (in_window(on.hour, on.minute, off.hour, off.minute)) id(AC_3).turn_on();
+              else id(AC_3).turn_off();
+            }
+            else if (m == "Heater") {
+              if (id(heat_on)) id(AC_3).turn_on(); else id(AC_3).turn_off();
+            }
+          }
+          {
+            std::string m = id(ac_4_mode).current_option();
+            if (m == "Off") id(AC_4).turn_off();
+            else if (m == "Always On") id(AC_4).turn_on();
+            else if (m == "Scheduled") {
+              auto on = id(ac_4_on_time).state_as_esptime();
+              auto off = id(ac_4_off_time).state_as_esptime();
+              if (in_window(on.hour, on.minute, off.hour, off.minute)) id(AC_4).turn_on();
+              else id(AC_4).turn_off();
+            }
+            else if (m == "Heater") {
+              if (id(heat_on)) id(AC_4).turn_on(); else id(AC_4).turn_off();
+            }
+          }
+          // ===== DC 5–8 role dispatch =====
+          auto now = id(sntp_time).now();
+          bool time_ok = now.is_valid();
+          bool leak = id(leak_sensor).state;   // ON = leak detected
+          // ----- Float sensor role conditions -----
+          // Polarity: EMPTY-type sensors read ON when water drops BELOW the level
+          // (triggered = ON). FULL/MAX-type sensors read OFF when water REACHES the
+          // level (triggered = OFF), same convention as the main water_level sensor.
+          std::string f1role = id(float_1_role).current_option();
+          std::string f2role = id(float_2_role).current_option();
+          bool reservoir_empty = (f1role == "Reservoir Empty" && id(float_1).state);    // empty: ON = below
+          bool ato_empty       = (f1role == "ATO Empty"       && id(float_1).state);    // empty: ON = below
+          bool drainage_full   = (f2role == "Drainage Full"   && !id(float_2).state);   // full: OFF = reached
+          // Water Level Failsafe: EITHER the level sensor OR float 2 reading full
+          // (both OFF) counts as "over level" and must stop ATO top-up / WC fill.
+          bool wl_failsafe = (f2role == "Water Level Failsafe" && !id(float_2).state);  // full: OFF = reached
+          // ----- DC5: Doser or Cooling Fan -----
+          {
+            std::string r = id(dc_5_role).current_option();
+            if (r == "Cooling Fan") {
+              if (id(cool_on)) id(dc_out5).turn_on(); else id(dc_out5).turn_off();
+            } else if (r == "Doser") {
+              if (time_ok) {
+                auto dt = id(dose_time_5).state_as_esptime();
+                if (now.hour == dt.hour && now.minute == dt.minute && !id(dosed_today_5)) {
+                  id(dosed_today_5) = true;
+                  id(run_doser)->execute(5);
+                }
+              }
+            }
+          }
+          // ----- DC6: Doser or CO2 -----
+          {
+            std::string r = id(dc_6_role).current_option();
+            if (r == "CO2") {
+              auto on = id(co2_on_time).state_as_esptime();
+              auto off = id(co2_off_time).state_as_esptime();
+              if (in_window(on.hour, on.minute, off.hour, off.minute)) id(dc_out6).turn_on();
+              else id(dc_out6).turn_off();
+            } else if (r == "Doser") {
+              if (time_ok) {
+                auto dt = id(dose_time_6).state_as_esptime();
+                if (now.hour == dt.hour && now.minute == dt.minute && !id(dosed_today_6)) {
+                  id(dosed_today_6) = true;
+                  id(run_doser)->execute(6);
+                }
+              }
+            }
+          }
+          // ----- DC7 role -----
+          // The ATO top-up itself is handled by the dedicated block below (its
+          // output depends on Salt Water). Here we only run DC7's dosing schedule,
+          // and keep DC7 off when it's in ATO role but the ATO is running on the
+          // filling pump (Salt Water off).
+          {
+            std::string r = id(dc_7_role).current_option();
+            if (r == "Doser") {
+              if (time_ok) {
+                auto dt = id(dose_time_7).state_as_esptime();
+                if (now.hour == dt.hour && now.minute == dt.minute && !id(dosed_today_7)) {
+                  id(dosed_today_7) = true;
+                  id(run_doser)->execute(7);
+                }
+              }
+            } else if (r == "ATO" && !id(salt_water).state) {
+              id(dc_out7).turn_off();
+            }
+          }
+          // ----- ATO top-up function -----
+          // Salt Water ON:  runs only when DC7 is in ATO role, driving DC7 (fresh
+          //   water top-off, keeping salinity stable).
+          // Salt Water OFF: runs regardless of DC7 role, driving the Filling Pump.
+          // Sensor semantics (fail-safe): water_level ON = dry (top up), OFF/fault
+          // = stop. Blocked by water change / leak / failsafe / ATO source empty;
+          // needs ATO Enabled or a manual Top Up Now; capped by ATO Max Runtime.
+          {
+            bool saltwater = id(salt_water).state;
+            bool run_ato = saltwater ? (id(dc_7_role).current_option() == "ATO") : true;
+            int areason = 0;              // 0 = topping up
+            if (!run_ato) {
+              areason = 1;                // DC7 not in ATO role (salt water mode)
+            } else {
+              esphome::switch_::Switch *ato_out = saltwater
+                  ? (esphome::switch_::Switch*) id(dc_out7)
+                  : (esphome::switch_::Switch*) id(dc_out2);
+              bool needs_water = id(water_level).state;
+              float maxrt = id(ato_max_runtime).state;
+              bool allowed = id(ato_enable).state || id(ato_topup_now);
+              if (id(wc_active))      areason = 2;
+              else if (leak)          areason = 3;
+              else if (wl_failsafe)   areason = 4;
+              else if (ato_empty)     areason = 5;
+              else if (id(ato_paused)) areason = 6;
+              if (areason != 0) {
+                ato_out->turn_off();        // blocked
+                id(ato_runtime) = 0;
+                id(ato_topup_now) = false;  // cancel any manual request while blocked
+              } else if (!needs_water) {
+                areason = 7;                // tank full
+                ato_out->turn_off();
+                id(ato_runtime) = 0;
+                id(ato_topup_now) = false;  // manual request satisfied
+              } else if (!allowed) {
+                areason = 8;                // ATO disabled and no manual request
+                ato_out->turn_off();
+              } else if (id(ato_runtime) >= maxrt) {
+                areason = 9;                // safety cap hit
+                ato_out->turn_off();
+                id(ato_topup_now) = false;
+              } else {
+                ato_out->turn_on();
+                id(ato_runtime) += 1;       // interval is 1s
+              }
+            }
+            // Log the reason only when it changes (the loop runs every second).
+            if (areason != id(ato_reason)) {
+              id(ato_reason) = areason;
+              switch (areason) {
+                case 0: ESP_LOGI("ato", "Topping up"); break;
+                case 1: ESP_LOGI("ato", "Idle: DC7 not in ATO role"); break;
+                case 2: ESP_LOGW("ato", "Blocked: water change active"); break;
+                case 3: ESP_LOGW("ato", "Blocked: leak detected"); break;
+                case 4: ESP_LOGW("ato", "Blocked: water level failsafe (float 2 at level)"); break;
+                case 5: ESP_LOGW("ato", "Blocked: ATO source empty (float 1)"); break;
+                case 6: ESP_LOGW("ato", "Stopped by user (ATO: Stop)"); break;
+                case 7: ESP_LOGI("ato", "Idle: tank full"); break;
+                case 8: ESP_LOGI("ato", "Idle: ATO disabled"); break;
+                case 9: ESP_LOGW("ato", "Stopped: max runtime reached — press Top Up Now or Cancel to reset"); break;
+              }
+            }
+          }
+          // ----- DC8: Doser or Solenoid -----
+          {
+            std::string r = id(dc_8_role).current_option();
+            if (r == "ATO Fill") {
+              // Solenoid closed unless a scheduled ATO run is active (driven below).
+              if (!id(as_active)) id(dc_out8).turn_off();
+            } else if (r == "Doser") {
+              if (time_ok) {
+                auto dt = id(dose_time_8).state_as_esptime();
+                if (now.hour == dt.hour && now.minute == dt.minute && !id(dosed_today_8)) {
+                  id(dosed_today_8) = true;
+                  id(run_doser)->execute(8);
+                }
+              }
+            }
+          }
+          // ----- Fixed doser DC3 -----
+          if (time_ok) {
+            auto dt = id(dose_time_3).state_as_esptime();
+            if (now.hour == dt.hour && now.minute == dt.minute && !id(dosed_today_3)) {
+              id(dosed_today_3) = true;
+              id(run_doser)->execute(3);
+            }
+          }
+          // ----- DC4: Doser or Refill Solenoid -----
+          {
+            std::string r4 = id(dc_4_role).current_option();
+            if (r4 == "Doser") {
+              if (time_ok) {
+                auto dt = id(dose_time_4).state_as_esptime();
+                if (now.hour == dt.hour && now.minute == dt.minute && !id(dosed_today_4)) {
+                  id(dosed_today_4) = true;
+                  id(run_doser)->execute(4);
+                }
+              }
+            } else if (r4 == "Refill Solenoid") {
+              // Solenoid closed unless a reservoir fill is running (driven below).
+              if (!id(rf_active)) id(dc_out4).turn_off();
+            }
+          }
+          // ===== Scheduled water change =====
+          // Fires once/day when enabled, today's day switch is on, and the
+          // clock matches wc_time. day_of_week: 1=Sun .. 7=Sat.
+          if (time_ok && id(wc_enable).state && !id(wc_done_today)) {
+            auto wct = id(wc_time).state_as_esptime();
+            bool day_on = false;
+            switch (now.day_of_week) {
+              case 1: day_on = id(wc_sun).state; break;
+              case 2: day_on = id(wc_mon).state; break;
+              case 3: day_on = id(wc_tue).state; break;
+              case 4: day_on = id(wc_wed).state; break;
+              case 5: day_on = id(wc_thu).state; break;
+              case 6: day_on = id(wc_fri).state; break;
+              case 7: day_on = id(wc_sat).state; break;
+            }
+            if (day_on && now.hour == wct.hour && now.minute == wct.minute) {
+              id(wc_done_today) = true;
+              id(wc_begin)->execute();
+              ESP_LOGI("wc", "Scheduled water change triggered");
+            }
+          }
+          // ===== Water change state machine (runs every 1s tick) =====
+          // Drain and fill are tracked separately so they can overlap in
+          // simultaneous mode. All progress is in persisted globals, so Stop
+          // (pause), Continue, and reboot-resume all work. Elapsed counters are
+          // in seconds because this loop ticks at 1s.
+          if (id(wc_active)) {
+            float Dwc = id(wc_drain_seconds).state;
+            float Rwc = id(wc_fill_ratio).state;
+            float maxfill = Rwc * Dwc * ((Rwc < 1.0f) ? 1.0f : 1.1f);
+            bool sim = id(wc_simultaneous).state;
+            // Auto-stop conditions — each pauses the change (resumable via
+            // Continue once cleared), same effect as pressing Stop.
+            if (!id(wc_paused)) {
+              if (leak) {
+                id(wc_paused) = true;
+                ESP_LOGW("wc", "Water change stopped: leak detected");
+              } else if (reservoir_empty) {
+                id(wc_paused) = true;
+                ESP_LOGW("wc", "Water change stopped: reservoir empty (float 1)");
+              } else if (drainage_full) {
+                id(wc_paused) = true;
+                ESP_LOGW("wc", "Water change stopped: drainage container full (float 2)");
+              }
+            }
+            if (id(wc_paused)) {
+              id(dc_out1).turn_off();
+              id(dc_out2).turn_off();
+            } else {
+              // ----- Drain track (timed) -----
+              if (!id(wc_drain_done)) {
+                id(dc_out1).turn_on();
+                id(wc_drain_elapsed) += 1;
+                if (id(wc_drain_elapsed) >= Dwc) {
+                  id(dc_out1).turn_off();
+                  id(wc_drain_done) = true;
+                  ESP_LOGI("wc", "Drain complete");
+                }
+              } else {
+                id(dc_out1).turn_off();
+              }
+              // ----- Fill track -----
+              if (!id(wc_fill_done)) {
+                if (!id(wc_fill_started)) {
+                  bool startfill = false;
+                  if (sim) {
+                    // Wait for the level sensor to clear (drop below normal =>
+                    // water_level ON/dry), then delay before filling.
+                    if (!id(wc_clear_seen)) {
+                      if (id(water_level).state == true) {
+                        id(wc_clear_seen) = true;
+                      } else if (id(wc_drain_done)) {
+                        // Drain finished but the level never cleared. Fill anyway
+                        // rather than leaving the tank drained. The level sensor
+                        // already reads full so it can't be the stop condition —
+                        // the Water Level Failsafe (if that role is selected) and
+                        // the max fill time bound this fill instead.
+                        id(wc_clear_seen)   = true;
+                        id(wc_fill_force)   = true;
+                        id(wc_fill_started) = true;
+                        id(wc_fill_elapsed) = 0;
+                        ESP_LOGW("wc", "Level never cleared — filling anyway (failsafe + max time only)");
+                      }
+                    } else {
+                      // ratio > 1 (fill slower than drain): start almost at once so
+                      //   the slow fill overlaps the drain as much as possible.
+                      // ratio <= 1 (fill faster): hold off by D*(1-R) so the fill
+                      //   reaches the sensor about when the drain finishes.
+                      float delayS = (Rwc > 1.0f) ? 10.0f : (Dwc * (1.0f - Rwc));
+                      if (id(wc_delay_elapsed) == 0)
+                        ESP_LOGI("wc", "Level cleared — waiting %d s before filling", (int) delayS);
+                      id(wc_delay_elapsed) += 1;
+                      if (id(wc_delay_elapsed) >= delayS) startfill = true;
+                    }
+                  } else {
+                    // Sequential: fill only after draining finishes.
+                    if (id(wc_drain_done)) startfill = true;
+                  }
+                  if (startfill) {
+                    id(wc_fill_started) = true;
+                    id(wc_fill_elapsed) = 0;
+                    ESP_LOGI("wc", "Filling");
+                  }
+                }
+                if (id(wc_fill_started) && !id(wc_fill_done)) {
+                  id(dc_out2).turn_on();
+                  id(wc_fill_elapsed) += 1;
+                  // End of fill = level reads wet again (water_level OFF), the
+                  // high-level failsafe (float 2) trips, or the max fill cap.
+                  // The level sensor is only ignored on a fallback fill (the
+                  // level never cleared, so the sensor already reads full and
+                  // can't be a meaningful stop) — that fill runs on time alone,
+                  // still bounded by the failsafe and the max fill time.
+                  if ((!id(wc_fill_force) && id(water_level).state == false)
+                      || wl_failsafe || id(wc_fill_elapsed) >= maxfill) {
+                    id(dc_out2).turn_off();
+                    id(wc_fill_done) = true;
+                    ESP_LOGI("wc", "Fill complete");
+                  }
+                }
+              } else {
+                id(dc_out2).turn_off();
+              }
+              // ----- Completion -----
+              if (id(wc_drain_done) && id(wc_fill_done)) {
+                id(dc_out1).turn_off();
+                id(dc_out2).turn_off();
+                id(wc_active)        = false;
+                id(wc_paused)        = false;
+                id(wc_drain_done)    = false;
+                id(wc_fill_started)  = false;
+                id(wc_fill_done)     = false;
+                id(wc_clear_seen)    = false;
+                id(wc_fill_force)    = false;
+                id(wc_drain_elapsed) = 0;
+                id(wc_fill_elapsed)  = 0;
+                id(wc_delay_elapsed) = 0;
+                ESP_LOGI("wc", "Water change complete");
+              }
+            }
+          }
+          // ===== Scheduled reservoir fill trigger =====
+          // Every day at rf_time when enabled. rf_begin enforces prerequisites.
+          if (time_ok && id(rf_enable).state && !id(rf_done_today)) {
+            auto rft = id(rf_time).state_as_esptime();
+            if (now.hour == rft.hour && now.minute == rft.minute) {
+              id(rf_done_today) = true;
+              id(rf_begin)->execute();
+              ESP_LOGI("rf", "Scheduled reservoir fill triggered");
+            }
+          }
+          // ===== Reservoir fill state machine (1s tick) =====
+          // Runs DC4 (Refill Solenoid) until the reservoir reads full (Float 2 in
+          // "Reservoir Full" role, OFF = full) or Reservoir Fill Max Runtime. A
+          // leak pauses it (resumable); a role/config change aborts it.
+          if (id(rf_active)) {
+            bool rf_ok = (f2role == "Reservoir Full")
+                      && (id(dc_4_role).current_option() == "Refill Solenoid");
+            if (!rf_ok) {
+              id(dc_out4).turn_off();
+              id(rf_active) = false;
+              id(rf_paused) = false;
+              id(rf_elapsed) = 0;
+              ESP_LOGW("rf", "Reservoir fill aborted: Float 2 or DC4 role changed");
+            } else if (leak && !id(rf_paused)) {
+              id(rf_paused) = true;
+              id(dc_out4).turn_off();
+              ESP_LOGW("rf", "Reservoir fill stopped: leak detected");
+            } else if (id(rf_paused)) {
+              id(dc_out4).turn_off();
+            } else {
+              bool reservoir_full = !id(float_2).state;   // Reservoir Full: OFF = full
+              float rfmax = id(rf_max_runtime).state;
+              if (reservoir_full) {
+                id(dc_out4).turn_off();
+                id(rf_active) = false;
+                id(rf_elapsed) = 0;
+                ESP_LOGI("rf", "Reservoir fill complete: reservoir full");
+              } else if (id(rf_elapsed) >= rfmax) {
+                id(dc_out4).turn_off();
+                id(rf_active) = false;
+                id(rf_elapsed) = 0;
+                ESP_LOGW("rf", "Reservoir fill stopped: max runtime reached");
+              } else {
+                id(dc_out4).turn_on();
+                id(rf_elapsed) += 1;
+              }
+            }
+          }
+          // ===== Scheduled ATO fill trigger =====
+          // Every day at as_time when enabled. as_begin enforces prerequisites.
+          if (time_ok && id(as_enable).state && !id(as_done_today)) {
+            auto ast = id(as_time).state_as_esptime();
+            if (now.hour == ast.hour && now.minute == ast.minute) {
+              id(as_done_today) = true;
+              id(as_begin)->execute();
+              ESP_LOGI("as", "Scheduled ATO fill triggered");
+            }
+          }
+          // ===== ATO fill state machine (1s tick) =====
+          // Requires Float 1 = ATO Full and DC8 = ATO Fill. Opens DC8 until
+          // the ATO Full float reads full (OFF), the Water Level Failsafe trips,
+          // or ATO Fill Max Runtime. A leak pauses it (resumable); it holds
+          // during a water change (auto-resumes); a role change aborts it.
+          if (id(as_active)) {
+            if (id(dc_8_role).current_option() != "ATO Fill" || f1role != "ATO Full") {
+              id(dc_out8).turn_off();
+              id(as_active) = false;
+              id(as_paused) = false;
+              id(as_elapsed) = 0;
+              ESP_LOGW("as", "ATO fill aborted: DC8 or Float 1 role changed");
+            } else if (leak && !id(as_paused)) {
+              id(as_paused) = true;
+              id(dc_out8).turn_off();
+              ESP_LOGW("as", "ATO fill stopped: leak detected");
+            } else if (id(as_paused) || id(wc_active)) {
+              // Paused by user/leak, or held during a water change.
+              id(dc_out8).turn_off();
+            } else {
+              // ATO Full float (role): OFF = level reached. Failsafe is an extra cutoff.
+              bool ato_full = (id(float_1).state == false) || wl_failsafe;
+              float asmax = id(as_max_runtime).state;
+              if (ato_full) {
+                id(dc_out8).turn_off();
+                id(as_active) = false;
+                id(as_elapsed) = 0;
+                ESP_LOGI("as", "ATO fill complete: ATO Full reached");
+              } else if (id(as_elapsed) >= asmax) {
+                id(dc_out8).turn_off();
+                id(as_active) = false;
+                id(as_elapsed) = 0;
+                ESP_LOGW("as", "ATO fill stopped: max runtime reached");
+              } else {
+                id(dc_out8).turn_on();
+                id(as_elapsed) += 1;
+              }
+            }
+          }
+          // ===== Force selected outputs off during a water change =====
+          // Runs last so it overrides the normal AC/DC control above.
+          if (id(wc_active)) {
+            if (id(ac1_off_wc).state) id(AC_1).turn_off();
+            if (id(ac2_off_wc).state) id(AC_2).turn_off();
+            if (id(ac3_off_wc).state) id(AC_3).turn_off();
+            if (id(ac4_off_wc).state) id(AC_4).turn_off();
+            if (id(dc6_off_wc).state) id(dc_out6).turn_off();
+            if (id(dc8_off_wc).state) id(dc_out8).turn_off();
+          }
