@@ -30,10 +30,22 @@ esphome:
             id(wc_paused) = true;
             ESP_LOGW("wc", "Reboot during a water change — paused. Press Continue to resume.");
           }
+          // Publish the running firmware version once (sensor is update_interval: never).
+          id(fw_version).publish_state(ESPHOME_PROJECT_VERSION);
 esp32:
   board: esp32dev
   framework:
     type: esp-idf
+    sdkconfig_options:
+      # HTTPS to GitHub needs a big contiguous TLS allocation. This device runs
+      # a lot (3× MCP expanders, HX711, web_server v3), so free heap is tight and
+      # the handshake can fail with "HTTP_CLIENT: Out of buffer" even when the
+      # request buffers are large enough. These free the mbedTLS RX/TX buffers
+      # when idle and size them to the negotiated length, reclaiming ~20KB+.
+      CONFIG_MBEDTLS_DYNAMIC_BUFFER: y
+      CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA: y
+      CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT: y
+      CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH: y
 logger:
   level: INFO
 api:
@@ -70,7 +82,8 @@ update:
     source: https://github.com/martinjcxn1/tank-controller/releases/latest/download/manifest.json
     update_interval: 6h
     web_server:
-      sorting_group_id: grp_settings
+      sorting_group_id: grp_firmware
+      sorting_weight: 20
 wifi:
   # No hard-coded network: boots straight into AP mode so WiFi can be selected
   # via the captive portal. Credentials entered there are stored in flash and
@@ -143,6 +156,9 @@ web_server:
     - id: grp_settings
       name: "Settings"
       sorting_weight: 90
+    - id: grp_firmware
+      name: "Firmware"
+      sorting_weight: 95
 i2c:
   scl: GPIO22
   sda: GPIO21
@@ -1244,7 +1260,7 @@ button:
     name: "Install Firmware Update"
     id: btn_fw_install
     icon: "mdi:cloud-download"
-    web_server: {sorting_group_id: grp_settings, sorting_weight: 5}
+    web_server: {sorting_group_id: grp_firmware, sorting_weight: 30}
     on_press:
       # Block the install (and its reboot) while a process is mid-cycle that a
       # reboot would corrupt: a water change, or an actual dose. Dual-role
@@ -1999,6 +2015,16 @@ sensor:
       float margin = (R < 1.0f) ? 1.0f : 1.1f;   // drop 1.1 safety when fill is faster than drain
       return R * id(wc_drain_seconds).state * margin;
 text_sensor:
+  # Running firmware version. This is the CI-injected project.version baked into
+  # the binary — the same value the update entity compares against the manifest.
+  # Shows "0.0.0-dev" on local/USB dev builds.
+  - platform: template
+    name: "Firmware Version"
+    id: fw_version
+    icon: "mdi:chip"
+    web_server: {sorting_group_id: grp_firmware, sorting_weight: 10}
+    update_interval: never
+    lambda: 'return {ESPHOME_PROJECT_VERSION};'
   # Current ESP date/time (from system clock; SNTP or the DS3231 RTC).
   - platform: template
     name: "Date / Time"
