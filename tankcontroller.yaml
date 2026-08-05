@@ -49,11 +49,14 @@ ota:
   - platform: http_request
 # Required by the http_request OTA/update platforms above.
 http_request:
-  # GitHub's releases/latest/download URL 302-redirects to a signed
-  # objects.githubusercontent.com URL >1KB long. The default 512-byte receive
-  # buffer can't hold that redirect's headers, causing "HTTP_CLIENT: Out of
-  # buffer" / esp_http_client_open ESP_FAIL when fetching the manifest
-  # (ESPHome issue #13786). 4KB comfortably covers it.
+  # GitHub's releases/latest/download URL 302-redirects to a very long signed
+  # objects.githubusercontent.com URL. When the client then SENDS the GET for
+  # that redirected URL, the ~700-char request line overflows the default
+  # 512-byte transmit buffer — that's the "HTTP_CLIENT: Out of buffer" /
+  # esp_http_client_open ESP_FAIL seen when fetching the manifest (ESPHome
+  # issue #13786). buffer_size_tx is the one that matters here; rx is bumped
+  # too to hold the redirect's response headers.
+  buffer_size_tx: 4096
   buffer_size_rx: 4096
   timeout: 15s
 # Self-update entity. Polls the GitHub Release manifest, compares its running
