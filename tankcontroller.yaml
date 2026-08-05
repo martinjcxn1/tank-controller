@@ -4,6 +4,14 @@ substitutions:
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
+  # Firmware version. On a release build, CI overwrites the value below with a
+  # generated UTC timestamp (e.g. 2026.08.05.1430) BEFORE compiling, then stamps
+  # that same value into manifest.json — so the version baked into the binary and
+  # the version advertised to devices always match. Leave the sentinel as-is; it
+  # only shows on local dev builds. Do not hand-edit it for releases.
+  project:
+    name: "martinjcxn.tank-controller"
+    version: "0.0.0-dev"   # CI-INJECTED: replaced at build time, do not edit
   on_boot:
     # All pumps/solenoids off at boot. ONLY the water change survives a reboot:
     # it's the one process that can leave the tank drained, so it restores in a
@@ -36,6 +44,23 @@ api:
 ota:
   - platform: esphome
   - platform: web_server
+  # Lets the device pull a compiled binary from a URL and self-flash. This is
+  # what the owner-triggered "Install Firmware Update" button uses.
+  - platform: http_request
+# Required by the http_request OTA/update platforms above.
+http_request:
+# Self-update entity. Polls the GitHub Release manifest, compares its running
+# version against the manifest "version", and exposes an update entity in
+# web_server/HA. Installing is owner-gated by the button further below — it is
+# NOT set to auto-install.
+update:
+  - platform: http_request
+    name: "Firmware Update"
+    id: fw_update
+    source: https://github.com/martinjcxn1/tank-controller/releases/latest/download/manifest.json
+    update_interval: 6h
+    web_server:
+      sorting_group_id: grp_settings
 wifi:
   # No hard-coded network: boots straight into AP mode so WiFi can be selected
   # via the captive portal. Credentials entered there are stored in flash and
@@ -1202,6 +1227,43 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
 button:
+  # Owner-triggered firmware update. Re-checks the GitHub Release manifest, then
+  # installs only if a newer version is advertised — a press on the latest
+  # firmware is a safe no-op. The device reboots into the new image on success.
+  - platform: template
+    name: "Install Firmware Update"
+    id: btn_fw_install
+    icon: "mdi:cloud-download"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 5}
+    on_press:
+      # Block the install (and its reboot) while a process is mid-cycle that a
+      # reboot would corrupt: a water change, or an actual dose. Dual-role
+      # outputs 5–8 only count as dosing when they're in "Doser" role — a
+      # running cooling fan / CO2 / ATO / solenoid does not block, since those
+      # are non-restoring and safe to interrupt.
+      - if:
+          condition:
+            lambda: |-
+              if (id(wc_active)) return true;
+              if (id(dc_out3).state || id(dc_out4).state) return true;
+              if (id(dc_out5).state && id(dc_5_role).current_option() == "Doser") return true;
+              if (id(dc_out6).state && id(dc_6_role).current_option() == "Doser") return true;
+              if (id(dc_out7).state && id(dc_7_role).current_option() == "Doser") return true;
+              if (id(dc_out8).state && id(dc_8_role).current_option() == "Doser") return true;
+              return false;
+          then:
+            - logger.log: "Firmware install blocked — a dose or water change is running. Try again once it finishes."
+          else:
+            - update.check: fw_update
+            - delay: 3s
+            - if:
+                condition:
+                  lambda: 'return id(fw_update).state == update::UPDATE_STATE_AVAILABLE;'
+                then:
+                  - logger.log: "Owner requested firmware install — updating."
+                  - update.perform: {id: fw_update}
+                else:
+                  - logger.log: "No firmware update available (already up to date)."
   - platform: template
     name: "CO2 Cal: Tare (Zero)"
     web_server: {sorting_group_id: grp_calibration, sorting_weight: 30}
