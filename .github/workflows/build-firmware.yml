@@ -1,0 +1,104 @@
+name: Build & Release Firmware
+
+# Builds the Tank Controller firmware on GitHub's servers and publishes the
+# compiled binary + an ESPHome update manifest as a GitHub Release. Each
+# device's "Install Firmware Update" button pulls that manifest and self-flashes.
+#
+# Trigger either by:
+#   - pushing a version tag:   git tag v2026.8.5 && git push origin v2026.8.5
+#   - the "Run workflow" button in the Actions tab (workflow_dispatch)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. v2026.8.5). Also created as a tag."
+        required: true
+
+# Needed so the workflow can create the Release and push the tag.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${VER}" >> "$GITHUB_OUTPUT"
+          echo "clean=${VER#v}" >> "$GITHUB_OUTPUT"
+
+      # Compiles tankcontroller.yaml with a pinned ESPHome version so builds are
+      # reproducible. Bump this when you upgrade your local ESPHome.
+      - name: Build firmware
+        uses: esphome/build-action@v6
+        id: esphome
+        with:
+          yaml-file: tankcontroller.yaml
+          version: 2026.7.3
+
+      # Collect the OTA binary and build an ESPHome update manifest. The update
+      # platform verifies the binary's md5 against the manifest, so we compute it
+      # here. The manifest's "path" is resolved relative to the manifest URL, so
+      # the .bin must sit in the same release as manifest.json (it does).
+      - name: Assemble release assets
+        id: assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          OTA_BIN="$(find "${{ steps.esphome.outputs.name }}" -name '*.ota.bin' | head -1)"
+          FACTORY_BIN="$(find "${{ steps.esphome.outputs.name }}" -name '*.factory.bin' | head -1 || true)"
+
+          cp "$OTA_BIN" dist/tankcontroller.ota.bin
+          if [ -n "${FACTORY_BIN:-}" ]; then
+            cp "$FACTORY_BIN" dist/tankcontroller.factory.bin
+          fi
+
+          MD5="$(md5sum dist/tankcontroller.ota.bin | awk '{print $1}')"
+          VER_CLEAN="${{ steps.version.outputs.clean }}"
+
+          cat > dist/manifest.json <<EOF
+          {
+            "name": "Tank Controller",
+            "version": "${VER_CLEAN}",
+            "home_assistant_domain": "esphome",
+            "new_install_prompt_erase": false,
+            "builds": [
+              {
+                "chipFamily": "ESP32",
+                "ota": {
+                  "path": "tankcontroller.ota.bin",
+                  "md5": "${MD5}",
+                  "summary": "Tank Controller ${VER_CLEAN}",
+                  "release_url": "https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
+                }
+              }
+            ]
+          }
+          EOF
+
+          echo "Built manifest:"
+          cat dist/manifest.json
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/tankcontroller.ota.bin
+            dist/tankcontroller.factory.bin
+            dist/manifest.json
