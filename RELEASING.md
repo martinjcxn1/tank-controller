@@ -1,60 +1,63 @@
 # Releasing firmware
 
-Devices update themselves over the air. You cut a release on GitHub; each unit's
-owner presses **Install Firmware Update** in the web UI and their device pulls
-the new binary and self-flashes. No build machine, no per-device work.
+Releases are **fully automated**. You don't touch a version number. Merge
+firmware changes to `main` and GitHub builds, versions, and publishes the
+release. Each unit's owner then presses **Install Firmware Update** in the web UI
+and their device pulls the new binary and self-flashes.
 
-## Cut a release
+## Ship a release
 
-Two ways to trigger a build (both run on GitHub's servers — your PC can be off):
+1. Make firmware changes in a branch/PR (editing `tankcontroller.yaml`).
+2. Merge to `main`.
 
-**Tag push (recommended):**
+That's it. On the merge, `.github/workflows/build-firmware.yml`:
 
-```bash
-git tag v2026.8.5
-git push origin v2026.8.5
-```
+1. Generates a version from the current UTC time (e.g. `2026.08.05.1430`).
+2. Injects it into the firmware, replacing the `0.0.0-dev` sentinel, then compiles — so the binary reports that exact version.
+3. Computes the compiled binary's md5 and compares it to the latest release. If the binary is byte-identical (e.g. a comment-only change), it stops — nothing to ship.
+4. Otherwise generates `manifest.json`, tags `v<version>` on the merge commit, and publishes a **Release** with `tankcontroller.ota.bin`, `tankcontroller.factory.bin`, and `manifest.json`.
 
-**Manual:** GitHub repo → **Actions** tab → *Build & Release Firmware* →
-**Run workflow** → enter a version like `v2026.8.5`.
+Watch it in the **Actions** tab. You can also trigger a run manually there
+(*Run workflow*).
 
-Either way, GitHub Actions:
+## Why timestamps, and why you never edit the version
 
-1. Compiles `tankcontroller.yaml` (ESPHome pinned in the workflow).
-2. Computes the OTA binary's md5 and writes `manifest.json`.
-3. Publishes a **Release** with `tankcontroller.ota.bin`, `tankcontroller.factory.bin`, and `manifest.json` attached.
+The device compares its own running version against the manifest version. If you
+hand-set a version and forgot to bump it, updates wouldn't be detected; if CI
+invented one but didn't bake it into the binary, devices would think an update
+was *always* available. The timestamp scheme sidesteps both: every build gets a
+unique, monotonically increasing version that is stamped into the binary and the
+manifest together. The `version:` line in `tankcontroller.yaml` stays at
+`0.0.0-dev` — that's only what a local dev build reports; CI overwrites it.
 
-Watch progress in the **Actions** tab. Green tick = release is live.
+**Do not hand-edit the `project.version` line for releases.** It's CI-managed.
 
-## How devices consume it
+## What triggers a release
 
-Firmware has a `update: http_request` entity pointed at
-`releases/latest/download/manifest.json`. It polls every 6h and compares its
-running version against the manifest `version`. When the owner presses **Install
-Firmware Update**, the device re-checks, and installs only if a newer version is
-advertised (a press on the latest firmware is a safe no-op). On success the
-device reboots into the new image.
-
-## Versioning
-
-The manifest `version` comes from the tag with the leading `v` stripped
-(`v2026.8.5` → `2026.8.5`). **Always bump the tag** — the update entity only
-flags an update when the manifest version differs from what's running. Reusing a
-tag means devices won't see a new version.
+Only pushes to `main` that touch `tankcontroller.yaml` (or the workflow itself)
+run the build — docs/other changes are ignored. And even then, a release is
+published only if the compiled binary actually differs from the last one. So no
+merge ever ships a redundant "update."
 
 ## First flash (new unit)
 
 OTA only works once a device is already running this firmware. Flash a brand-new
 board over USB with `tankcontroller.factory.bin` (via ESPHome Web / esptool);
-after that it self-updates.
+after that it self-updates. A fresh local/USB build reports version `0.0.0-dev`,
+so it will immediately see the latest release as an available update — expected.
+
+## How devices consume it
+
+Firmware has a `update: http_request` entity pointed at
+`releases/latest/download/manifest.json`. It polls every 6h and compares its
+running version against the manifest. The owner's **Install Firmware Update**
+button re-checks and installs only if a newer version is advertised; the install
+is blocked while a dose or water change is running. On success the device reboots
+into the new image.
 
 ## Notes
 
 - **No secrets in the repo.** WiFi is provisioned per-unit via the captive
-  portal, so the public binary carries no credentials. Keep it that way — don't
-  hardcode network creds in the YAML.
-- **ESPHome version** is pinned in `.github/workflows/build-firmware.yml`
-  (`version:`). Bump it when you upgrade your local ESPHome so CI matches.
-- **Don't interrupt active cycles.** An OTA reboot mid-dose or mid-water-change
-  will break the cycle. Consider guarding the install button against active
-  states if that becomes a problem in the field.
+  portal, so the public binary carries no credentials. Keep it that way.
+- **ESPHome version** is pinned in the workflow (`version:`). Bump it when you
+  upgrade your local ESPHome so CI matches.

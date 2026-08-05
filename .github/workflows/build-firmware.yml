@@ -1,47 +1,53 @@
 name: Build & Release Firmware
 
-# Builds the Tank Controller firmware on GitHub's servers and publishes the
-# compiled binary + an ESPHome update manifest as a GitHub Release. Each
-# device's "Install Firmware Update" button pulls that manifest and self-flashes.
+# Fully automated, version-free releases.
 #
-# Trigger either by:
-#   - pushing a version tag:   git tag v2026.8.5 && git push origin v2026.8.5
-#   - the "Run workflow" button in the Actions tab (workflow_dispatch)
+# Just merge firmware changes to main. This workflow generates a UTC-timestamp
+# version, injects it into the firmware before compiling (so the binary and the
+# manifest report the same version), builds, and — only if the compiled binary
+# actually differs from the latest release — publishes a new GitHub Release.
+# Devices then self-flash on their owner's button press.
+#
+# You never touch a version number. A comment-only edit that produces an
+# identical binary is detected via md5 and does NOT ship a pointless update.
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g. v2026.8.5). Also created as a tag."
-        required: true
+    branches:
+      - main
+    paths:
+      - "tankcontroller.yaml"
+      - ".github/workflows/build-firmware.yml"
+  workflow_dispatch:        # manual run always builds & (if changed) releases
 
-# Needed so the workflow can create the Release and push the tag.
 permissions:
   contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve version
+      # UTC timestamp: unique per run and lexicographically monotonic, so newer
+      # always sorts/compares as newer.
+      - name: Generate version
         id: version
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VER="${{ github.event.inputs.version }}"
-          else
-            VER="${GITHUB_REF_NAME}"
-          fi
-          echo "tag=${VER}" >> "$GITHUB_OUTPUT"
-          echo "clean=${VER#v}" >> "$GITHUB_OUTPUT"
+          VER="$(date -u +%Y.%m.%d.%H%M)"
+          echo "clean=${VER}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VER}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VER}"
 
-      # Compiles tankcontroller.yaml with a pinned ESPHome version so builds are
-      # reproducible. Bump this when you upgrade your local ESPHome.
+      # Overwrite the sentinel so the compiled binary reports the release version.
+      - name: Inject version into firmware
+        run: |
+          set -euo pipefail
+          sed -i 's/version: "0.0.0-dev".*/version: "${{ steps.version.outputs.clean }}"/' tankcontroller.yaml
+          echo "Injected:"
+          grep -n 'version:' tankcontroller.yaml | grep "${{ steps.version.outputs.clean }}"
+
       - name: Build firmware
         uses: esphome/build-action@v6
         id: esphome
@@ -49,26 +55,42 @@ jobs:
           yaml-file: tankcontroller.yaml
           version: 2026.7.3
 
-      # Collect the OTA binary and build an ESPHome update manifest. The update
-      # platform verifies the binary's md5 against the manifest, so we compute it
-      # here. The manifest's "path" is resolved relative to the manifest URL, so
-      # the .bin must sit in the same release as manifest.json (it does).
-      - name: Assemble release assets
-        id: assets
+      - name: Collect binary + compute md5
+        id: bin
         run: |
           set -euo pipefail
           mkdir -p dist
           OTA_BIN="$(find "${{ steps.esphome.outputs.name }}" -name '*.ota.bin' | head -1)"
           FACTORY_BIN="$(find "${{ steps.esphome.outputs.name }}" -name '*.factory.bin' | head -1 || true)"
-
           cp "$OTA_BIN" dist/tankcontroller.ota.bin
-          if [ -n "${FACTORY_BIN:-}" ]; then
-            cp "$FACTORY_BIN" dist/tankcontroller.factory.bin
+          [ -n "${FACTORY_BIN:-}" ] && cp "$FACTORY_BIN" dist/tankcontroller.factory.bin || true
+          MD5="$(md5sum dist/tankcontroller.ota.bin | awk '{print $1}')"
+          echo "md5=${MD5}" >> "$GITHUB_OUTPUT"
+          echo "New binary md5: ${MD5}"
+
+      # Compare against the md5 recorded in the latest release's manifest. If the
+      # binary is byte-identical, there's nothing new to ship — skip the release.
+      # (Missing/first release -> PREV empty -> treated as changed.)
+      - name: Has the binary changed?
+        id: changed
+        run: |
+          set -euo pipefail
+          PREV="$(curl -fsSL "https://github.com/${{ github.repository }}/releases/latest/download/manifest.json" \
+                    | python3 -c 'import sys,json; print(json.load(sys.stdin)["builds"][0]["ota"]["md5"])' 2>/dev/null || true)"
+          echo "Previous md5: ${PREV:-<none>}"
+          if [ "${PREV:-}" = "${{ steps.bin.outputs.md5 }}" ]; then
+            echo "ship=false" >> "$GITHUB_OUTPUT"
+            echo "Binary unchanged — nothing to release."
+          else
+            echo "ship=true" >> "$GITHUB_OUTPUT"
+            echo "Binary changed — releasing."
           fi
 
-          MD5="$(md5sum dist/tankcontroller.ota.bin | awk '{print $1}')"
+      - name: Build manifest
+        if: steps.changed.outputs.ship == 'true'
+        run: |
+          set -euo pipefail
           VER_CLEAN="${{ steps.version.outputs.clean }}"
-
           cat > dist/manifest.json <<EOF
           {
             "name": "Tank Controller",
@@ -80,7 +102,7 @@ jobs:
                 "chipFamily": "ESP32",
                 "ota": {
                   "path": "tankcontroller.ota.bin",
-                  "md5": "${MD5}",
+                  "md5": "${{ steps.bin.outputs.md5 }}",
                   "summary": "Tank Controller ${VER_CLEAN}",
                   "release_url": "https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
                 }
@@ -88,11 +110,10 @@ jobs:
             ]
           }
           EOF
-
-          echo "Built manifest:"
           cat dist/manifest.json
 
       - name: Publish GitHub Release
+        if: steps.changed.outputs.ship == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}

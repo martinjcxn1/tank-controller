@@ -4,6 +4,14 @@ substitutions:
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
+  # Firmware version. On a release build, CI overwrites the value below with a
+  # generated UTC timestamp (e.g. 2026.08.05.1430) BEFORE compiling, then stamps
+  # that same value into manifest.json — so the version baked into the binary and
+  # the version advertised to devices always match. Leave the sentinel as-is; it
+  # only shows on local dev builds. Do not hand-edit it for releases.
+  project:
+    name: "martinjcxn.tank-controller"
+    version: "0.0.0-dev"   # CI-INJECTED: replaced at build time, do not edit
   on_boot:
     # All pumps/solenoids off at boot. ONLY the water change survives a reboot:
     # it's the one process that can leave the tank drained, so it restores in a
