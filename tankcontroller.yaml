@@ -37,11 +37,11 @@ esp32:
   framework:
     type: esp-idf
     sdkconfig_options:
-      # HTTPS to GitHub needs a big contiguous TLS allocation. This device runs
-      # a lot (3× MCP expanders, HX711, web_server v3), so free heap is tight and
-      # the handshake can fail with "HTTP_CLIENT: Out of buffer" even when the
-      # request buffers are large enough. These free the mbedTLS RX/TX buffers
-      # when idle and size them to the negotiated length, reclaiming ~20KB+.
+      # Optional RAM headroom for the HTTPS/TLS used by OTA. NOT required (the
+      # device measured ~108KB largest free block, so heap was never the OTA
+      # blocker — that was the redirect-URL bug, fixed by Pages hosting). These
+      # free the mbedTLS RX/TX buffers when idle and size them to the negotiated
+      # length, reclaiming ~20KB+ — kept as cheap insurance for a busy board.
       CONFIG_MBEDTLS_DYNAMIC_BUFFER: y
       CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA: y
       CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT: y
@@ -61,15 +61,14 @@ ota:
   - platform: http_request
 # Required by the http_request OTA/update platforms above.
 http_request:
-  # GitHub's releases/latest/download URL 302-redirects to a very long signed
-  # objects.githubusercontent.com URL. When the client then SENDS the GET for
-  # that redirected URL, the ~700-char request line overflows the default
-  # 512-byte transmit buffer — that's the "HTTP_CLIENT: Out of buffer" /
-  # esp_http_client_open ESP_FAIL seen when fetching the manifest (ESPHome
-  # issue #13786). buffer_size_tx is the one that matters here; rx is bumped
-  # too to hold the redirect's response headers.
-  buffer_size_tx: 4096
-  buffer_size_rx: 4096
+  # The manifest/binary are served from GitHub *Pages* (short, direct URLs), NOT
+  # GitHub Releases. Release download URLs 302-redirect to a ~930-byte signed
+  # release-assets URL, which trips a hard esp_http_client limit ("HTTP_CLIENT:
+  # Out of buffer" / esp_http_client_open ESP_FAIL) that buffer_size_* does NOT
+  # fix — confirmed in ESPHome issue #13786, where Pages is the known-good
+  # workaround. Pages URLs don't redirect, so the default buffers are fine and
+  # TLS verification stays on.
+  verify_ssl: true
   timeout: 15s
 # Self-update entity. Polls the GitHub Release manifest, compares its running
 # version against the manifest "version", and exposes an update entity in
@@ -79,7 +78,7 @@ update:
   - platform: http_request
     name: "Firmware Update"
     id: fw_update
-    source: https://github.com/martinjcxn1/tank-controller/releases/latest/download/manifest.json
+    source: https://martinjcxn1.github.io/tank-controller/manifest.json
     update_interval: 6h
     web_server:
       sorting_group_id: grp_firmware
@@ -1972,6 +1971,28 @@ binary_sensor:
       // Top sensor (raw OFF = at level/full) → invert so "full" reads Wet/On.
       return !id(water_level).state;
 sensor:
+  # RAM diagnostics for the OTA/TLS handshake. "Largest Free Block" is the number
+  # that matters: TLS needs one big contiguous allocation, so a fragmented heap
+  # can fail even with lots of total free RAM. If this dips near/below the TLS
+  # need (~40KB) when you press Install, heap is the cause of the update failure.
+  - platform: template
+    name: "Free Heap"
+    id: free_heap
+    unit_of_measurement: "B"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server: {sorting_group_id: grp_firmware, sorting_weight: 40}
+    update_interval: 5s
+    lambda: 'return (float) esp_get_free_heap_size();'
+  - platform: template
+    name: "Largest Free Block"
+    id: largest_free_block
+    unit_of_measurement: "B"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    web_server: {sorting_group_id: grp_firmware, sorting_weight: 45}
+    update_interval: 5s
+    lambda: 'return (float) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);'
   - platform: dallas_temp
     name: "Tank Temperature"
     id: tank_temperature

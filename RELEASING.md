@@ -14,11 +14,28 @@ That's it. On the merge, `.github/workflows/build-firmware.yml`:
 
 1. Generates a version from the current UTC time (e.g. `2026.08.05.1430`).
 2. Injects it into the firmware, replacing the `0.0.0-dev` sentinel, then compiles — so the binary reports that exact version.
-3. Computes the compiled binary's md5 and compares it to the latest release. If the binary is byte-identical (e.g. a comment-only change), it stops — nothing to ship.
-4. Otherwise generates `manifest.json`, tags `v<version>` on the merge commit, and publishes a **Release** with `tankcontroller.ota.bin`, `tankcontroller.factory.bin`, and `manifest.json`.
+3. Computes the compiled binary's md5 and compares it to what's currently published. If the binary is byte-identical (e.g. a comment-only change), it stops — nothing to ship.
+4. Otherwise it publishes `manifest.json` + `tankcontroller.ota.bin` to **GitHub Pages** (this is what devices fetch), and also publishes a **Release** tagged `v<version>` with the same files plus `tankcontroller.factory.bin` for humans and rollback.
 
 Watch it in the **Actions** tab. You can also trigger a run manually there
 (*Run workflow*).
+
+## One-time setup: enable Pages
+
+Devices fetch from GitHub Pages, so Pages must be enabled once:
+repo **Settings → Pages → Build and deployment → Source = "GitHub Actions"**.
+Until that's set, the deploy step fails. The device update source is
+`https://martinjcxn1.github.io/tank-controller/manifest.json`.
+
+## Why Pages and not Releases
+
+Release download URLs (`releases/latest/download/…`) 302-redirect to a ~930-byte
+signed `release-assets.githubusercontent.com` URL. That long URL trips a hard
+internal limit in ESP-IDF's HTTP client — `HTTP_CLIENT: Out of buffer` /
+`esp_http_client_open failed` on the manifest, and a TLS read error partway
+through the firmware download — and `buffer_size_*` does **not** fix it (ESPHome
+issue #13786). GitHub Pages serves short, non-redirecting URLs, so both the
+update check and the binary download work, with TLS verification left on.
 
 ## Why timestamps, and why you never edit the version
 
