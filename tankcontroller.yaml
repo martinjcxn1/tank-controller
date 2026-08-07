@@ -36,12 +36,16 @@ esp32:
   board: esp32dev
   framework:
     type: esp-idf
-    # NOTE: mbedTLS dynamic/variable-length buffer options were tried here and
-    # REMOVED. They resize/free the TLS buffers, which breaks reading the large
-    # streaming TLS records during the firmware download (mbedTLS -0x7100
-    # BAD_INPUT_DATA mid-transfer). Standard full-size TLS buffers handle the
-    # download fine, and heap is plentiful (~108KB free block), so there's no
-    # reason to shrink them. Leave this stock.
+    sdkconfig_options:
+      # Optional RAM headroom for the HTTPS/TLS used by OTA. NOT required (the
+      # device measured ~108KB largest free block, so heap was never the OTA
+      # blocker — that was the redirect-URL bug, fixed by Pages hosting). These
+      # free the mbedTLS RX/TX buffers when idle and size them to the negotiated
+      # length, reclaiming ~20KB+ — kept as cheap insurance for a busy board.
+      CONFIG_MBEDTLS_DYNAMIC_BUFFER: y
+      CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA: y
+      CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT: y
+      CONFIG_MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH: y
 logger:
   level: INFO
 api:
