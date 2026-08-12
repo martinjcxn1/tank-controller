@@ -70,7 +70,7 @@ Outputs marked "Yes" have a Role setting in the **Settings** section. Changing t
 ### Sensors
 
 - **Tank temperature** — a waterproof probe in the tank or sump. Used for heating and cooling.
-- **Water level (optical sensor)** — mounted at your normal water line. Tells the controller when evaporation has dropped the level and a top-up is needed.
+- **Water level (optical sensor)** — mounted at your normal water line. Shown as **Top Up Needed** in the control panel: it switches on when evaporation has dropped the level far enough to need topping up.
 - **Leak detector** — placed on the floor or in the cabinet. If it gets wet, the controller stops all water movement.
 - **Float 1 and Float 2** — two switches you assign to jobs such as "reservoir empty" or "drainage container full". See section 9.
 - **CO2 bottle scale** — optional load cell under the CO2 cylinder to show how much gas is left.
@@ -125,7 +125,7 @@ The control panel is divided into sections. Each one groups related settings tog
 
 | Section | What it covers |
 |---|---|
-| Status & Sensors | Live readings: time, temperature, leak, floats, water level |
+| Status & Sensors | Live readings: time, temperature, leak, floats, top-up level |
 | Temperature Control | The thermostat — heating and cooling |
 | Water Change Settings | How a water change runs, plus manual start/stop buttons |
 | Water Change Schedule | Which days and what time water changes happen |
@@ -215,6 +215,8 @@ On a marine tank only fresh water is added, because salt does not evaporate. Tha
 - **Continue** — resumes it.
 - **Cancel** — clears everything and leaves the ATO stopped. Use this if the ATO seems stuck. Press Continue afterwards to switch it back on.
 
+> **If the ATO reaches its time limit** — It stops itself and stays stopped until you press Continue. This is deliberate: a top-up that runs the full Max Runtime without satisfying the level sensor usually means an empty reservoir, a blocked line or a failed sensor, and the controller will not quietly keep trying. Check the cause first, then press Continue.
+
 ### ATO Status
 
 This line tells you exactly what the ATO is doing and, if it is not running, why. It is the first place to look if top-ups are not happening.
@@ -229,7 +231,7 @@ This line tells you exactly what the ATO is doing and, if it is not running, why
 | blocked: water change active | Normal during a water change. It will resume after |
 | blocked: ATO source empty | Your top-up reservoir needs refilling |
 | blocked: water level failsafe | The backup high-level float says the tank is full |
-| stopped: max runtime reached | The safety limit was hit. Press Top Up Now or Cancel to reset |
+| stopped: max runtime reached | The safety limit was hit and the ATO has stopped itself. Press Continue |
 
 ### ATO Fill (solenoid top-up)
 
@@ -330,6 +332,8 @@ Start Now, Stop, Continue and Cancel work as described in section 4.
 The two float switches are general-purpose. You tell the controller what each one is watching using **Float 1 Role** and **Float 2 Role**, found in the Settings section at the bottom of the page.
 
 Whatever you choose is displayed above that float in Status & Sensors, so you can always see what each float is watching without leaving the page.
+
+Each float switches **OFF when its condition is met** — so a float assigned to "Reservoir Empty" reads OFF once the reservoir actually is empty. This is a safety choice: a float that comes loose or loses a wire reads ON, which the controller treats as "condition not met", rather than silently reporting a level it cannot actually see.
 
 ### Float 1 options
 
@@ -465,7 +469,7 @@ DC 3 is always a dosing pump, so it has a label but no role.
 - Read the **ATO Status** line. It names the reason directly.
 - Check **ATO Enabled** is on.
 - If it says `stopped by user`, press Continue.
-- If it says `max runtime reached`, the pump ran out of time — check the reservoir has water and the tubing is not blocked, then press Top Up Now.
+- If it says `max runtime reached`, the ATO stopped itself on its safety limit. Check the reservoir has water and the tubing is not blocked, then press Continue.
 
 ### A water change stopped part way
 

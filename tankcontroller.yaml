@@ -237,6 +237,12 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
+  # True when the pause was caused by hitting ATO Max Runtime rather than by the
+  # user, so the status/log can name the real reason while it waits to be cleared.
+  - id: ato_cap_latch
+    type: bool
+    restore_value: false
+    initial_value: 'false'
   # Why the ATO is doing what it's doing. Logged (and shown in ATO Status) only
   # when it CHANGES, so the log isn't flooded by the 1s loop. -1 = not yet set.
   - id: ato_reason
@@ -1630,6 +1636,7 @@ button:
             ESP_LOGI("ato", "Top Up Now ignored: DC7 not in ATO role"); return;
           }
           id(ato_paused) = false;      // a manual top-up clears an ATO pause
+          id(ato_cap_latch) = false;
           id(ato_runtime) = 0;         // fresh allowance: clears a latched max-runtime cap
           id(ato_topup_now) = true;
           ESP_LOGI("ato", "Manual top-up requested");
@@ -1640,6 +1647,7 @@ button:
     on_press:
       - lambda: |-
           id(ato_paused) = true;
+          id(ato_cap_latch) = false;   // this is a user stop, not a runtime cap
           id(ato_topup_now) = false;
           ESP_LOGW("ato", "ATO stopped (paused) by user");
   - platform: template
@@ -1648,6 +1656,7 @@ button:
     on_press:
       - lambda: |-
           id(ato_paused) = false;
+          id(ato_cap_latch) = false;
           id(ato_runtime) = 0;         // fresh allowance: clears a latched max-runtime cap
           ESP_LOGI("ato", "ATO resumed");
   # Cancel = clear all ATO state (pause, pending manual top-up, runtime cap) and
@@ -1664,6 +1673,7 @@ button:
           id(ato_topup_now) = false;
           id(ato_runtime)   = 0;
           id(ato_paused)    = true;
+          id(ato_cap_latch) = false;
           ESP_LOGW("ato", "ATO cancelled and cleared — press Continue to re-enable");
 script:
   # Single parameterised doser script. Computes run time = volume / rate,
@@ -1939,7 +1949,7 @@ binary_sensor:
       number: GPIO34
       inverted: true
     id: water_level
-    name: "Water Level"
+    name: "Top Up Needed"
     web_server: {sorting_group_id: grp_status, sorting_weight: 70}
     # Debounce both edges so ripples/splashing can't briefly read "at level" and
     # end a fill early, or "below" and kick the ATO. 500ms stable either way.
@@ -2153,7 +2163,7 @@ text_sensor:
         case 6: return std::string("stopped by user");
         case 7: return std::string("idle: tank full");
         case 8: return std::string("idle: ATO disabled");
-        case 9: return std::string("stopped: max runtime reached");
+        case 9: return std::string("stopped: max runtime reached — press Continue");
       }
       return std::string("starting up");
 climate:
@@ -2372,7 +2382,7 @@ interval:
               else if (leak)          areason = 3;
               else if (wl_failsafe)   areason = 4;
               else if (ato_empty)     areason = 5;
-              else if (id(ato_paused)) areason = 6;
+              else if (id(ato_paused)) areason = id(ato_cap_latch) ? 9 : 6;
               if (areason != 0) {
                 ato_out->turn_off();        // blocked
                 id(ato_runtime) = 0;
@@ -2386,9 +2396,14 @@ interval:
                 areason = 8;                // ATO disabled and no manual request
                 ato_out->turn_off();
               } else if (id(ato_runtime) >= maxrt) {
-                areason = 9;                // safety cap hit
+                // Safety cap hit: stop the ATO the same way the Stop button does.
+                // It stays stopped until the user clears it (Continue / Top Up
+                // Now / Cancel), so a runaway top-up can't quietly resume.
+                areason = 9;
                 ato_out->turn_off();
                 id(ato_topup_now) = false;
+                id(ato_paused)    = true;
+                id(ato_cap_latch) = true;
               } else {
                 ato_out->turn_on();
                 id(ato_runtime) += 1;       // interval is 1s
@@ -2407,7 +2422,7 @@ interval:
                 case 6: ESP_LOGW("ato", "Stopped by user (ATO: Stop)"); break;
                 case 7: ESP_LOGI("ato", "Idle: tank full"); break;
                 case 8: ESP_LOGI("ato", "Idle: ATO disabled"); break;
-                case 9: ESP_LOGW("ato", "Stopped: max runtime reached — press Top Up Now or Cancel to reset"); break;
+                case 9: ESP_LOGW("ato", "STOPPED: max runtime reached — ATO is off until you press Continue"); break;
               }
             }
           }
