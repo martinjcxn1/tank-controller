@@ -44,6 +44,12 @@ esp32:
     # reason to shrink them. Leave this stock.
 logger:
   level: INFO
+  logs:
+    # The HX711 (CO2 bottle scale) logs "DOUT pin not high" at WARN on every read
+    # attempt when no load cell is connected. At a 1s update interval that floods
+    # the log and buries everything else, so drop this component to ERROR. Genuine
+    # errors still show, and CO2 Weight still reads NaN if the cell is absent.
+    hx711: ERROR
 api:
   # Default is reboot_timeout: 15min — the device reboots if no API client
   # (Home Assistant) ever connects. This unit runs standalone off its web
