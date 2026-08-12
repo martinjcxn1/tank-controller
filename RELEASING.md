@@ -65,12 +65,17 @@ so it will immediately see the latest release as an available update — expecte
 
 ## How devices consume it
 
-Firmware has a `update: http_request` entity pointed at
-`releases/latest/download/manifest.json`. It polls every 6h and compares its
-running version against the manifest. The owner's **Install Firmware Update**
+Firmware has a `update: http_request` entity pointed at the **Pages** manifest,
+`https://martinjcxn1.github.io/tank-controller/manifest.json` (not the Release
+asset — see "Why Pages and not Releases" above). It polls every 6h and compares
+its running version against the manifest. The owner's **Install Firmware Update**
 button re-checks and installs only if a newer version is advertised; the install
 is blocked while a dose or water change is running. On success the device reboots
 into the new image.
+
+If you ever change where releases are published, the `source:` URL in
+`tankcontroller.yaml` must be updated to match — devices in the field only look
+where that URL points.
 
 ## Notes
 
