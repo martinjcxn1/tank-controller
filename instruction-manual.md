@@ -333,7 +333,9 @@ The two float switches are general-purpose. You tell the controller what each on
 
 Whatever you choose is displayed above that float in Status & Sensors, so you can always see what each float is watching without leaving the page.
 
-Each float switches **OFF when its condition is met** — so a float assigned to "Reservoir Empty" reads OFF once the reservoir actually is empty. This is a safety choice: a float that comes loose or loses a wire reads ON, which the controller treats as "condition not met", rather than silently reporting a level it cannot actually see.
+Each float switches **OFF when its condition is met** — so a float assigned to "Reservoir Empty" reads OFF once the reservoir actually is empty.
+
+A disconnected or failed float also reads OFF, which the controller treats the same way: as though the condition *is* met. That is deliberate. A float that comes loose is assumed to be reporting an empty reservoir, a full waste container or a tank at its failsafe level, so the controller stops rather than carrying on with a sensor it cannot trust. If a process keeps stopping for no obvious reason, check that float's wiring before changing any settings.
 
 ### Float 1 options
 
