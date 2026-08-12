@@ -1910,62 +1910,42 @@ binary_sensor:
     filters:
       - delayed_on: 200ms
       - delayed_off: 2s
-  # Raw float pins keep their as-wired polarity (used by the control logic) and
-  # are hidden from the web; the "_display" copies below are what's shown.
+  # ---- Level inputs ----
+  # CONVENTION: every level input reads OFF when its condition is fulfilled, and
+  # ON when it is not. The switches are pulled up and close on the condition, so
+  # a disconnected or failed input sits ON = "condition not met". Nothing is
+  # inverted for display — what the UI shows IS the value the logic uses.
   - platform: gpio
     pin: GPIO36
     id: float_1
-    internal: true
-    device_class: moisture
+    name: "Float 1"
+    web_server: {sorting_group_id: grp_status, sorting_weight: 50}
     filters:
       - delayed_on: 500ms
       - delayed_off: 500ms
   - platform: gpio
     pin: GPIO39
     id: float_2
-    internal: true
-    device_class: moisture
-    filters:
-      - delayed_on: 500ms
-      - delayed_off: 500ms
-  # Web display copies. Max/top roles show inverted, so "at the level" reads
-  # Wet/On even though those sensors are wired OFF-when-reached.
-  - platform: template
-    id: float_1_display
-    name: "Float 1"
-    device_class: moisture
-    web_server: {sorting_group_id: grp_status, sorting_weight: 50}
-    lambda: |-
-      // ATO Full is a max sensor (raw OFF = at level) → invert for display.
-      if (id(float_1_role).current_option() == "ATO Full") return !id(float_1).state;
-      // Empty roles (Reservoir Empty / ATO Empty) read raw ON when below → as-is.
-      return id(float_1).state;
-  - platform: template
-    id: float_2_display
     name: "Float 2"
-    device_class: moisture
     web_server: {sorting_group_id: grp_status, sorting_weight: 60}
-    lambda: |-
-      // All Float 2 roles are max sensors (raw OFF = at level) → invert for display.
-      return !id(float_2).state;
-  - platform: gpio
-    pin: GPIO34
-    id: water_level
-    internal: true
-    device_class: moisture
-    # Debounce both edges so ripples/splashing can't briefly read "full" and end
-    # a fill early, or "dry" and kick the ATO. 500ms stable either way.
     filters:
       - delayed_on: 500ms
       - delayed_off: 500ms
-  - platform: template
-    id: water_level_display
+  # Optical level sensor. Its module output is ON when submerged, which is the
+  # opposite of the convention above, so it is inverted at the pin: state OFF =
+  # at level (condition met), ON = below level (needs topping up).
+  - platform: gpio
+    pin:
+      number: GPIO34
+      inverted: true
+    id: water_level
     name: "Water Level"
-    device_class: moisture
     web_server: {sorting_group_id: grp_status, sorting_weight: 70}
-    lambda: |-
-      // Top sensor (raw OFF = at level/full) → invert so "full" reads Wet/On.
-      return !id(water_level).state;
+    # Debounce both edges so ripples/splashing can't briefly read "at level" and
+    # end a fill early, or "below" and kick the ATO. 500ms stable either way.
+    filters:
+      - delayed_on: 500ms
+      - delayed_off: 500ms
 sensor:
   # RAM diagnostics for the OTA/TLS handshake. "Largest Free Block" is the number
   # that matters: TLS needs one big contiguous allocation, so a fragmented heap
@@ -2127,7 +2107,7 @@ text_sensor:
       if (!id(wc_active)) return std::string("idle");
       if (id(wc_paused)) {
         if (id(leak_sensor).state) return std::string("paused: leak detected");
-        if (id(float_1_role).current_option() == "Reservoir Empty" && id(float_1).state)
+        if (id(float_1_role).current_option() == "Reservoir Empty" && !id(float_1).state)
           return std::string("paused: reservoir empty (float 1)");
         if (id(float_2_role).current_option() == "Drainage Full" && !id(float_2).state)
           return std::string("paused: drainage full (float 2)");
@@ -2307,12 +2287,15 @@ interval:
           // level (triggered = OFF), same convention as the main water_level sensor.
           std::string f1role = id(float_1_role).current_option();
           std::string f2role = id(float_2_role).current_option();
-          bool reservoir_empty = (f1role == "Reservoir Empty" && id(float_1).state);    // empty: ON = below
-          bool ato_empty       = (f1role == "ATO Empty"       && id(float_1).state);    // empty: ON = below
-          bool drainage_full   = (f2role == "Drainage Full"   && !id(float_2).state);   // full: OFF = reached
+          // All float conditions are TRUE when the input reads OFF (see convention
+          // at the binary_sensor definitions): the switch closes on the condition,
+          // so a disconnect sits ON and reads as "condition not met".
+          bool reservoir_empty = (f1role == "Reservoir Empty" && !id(float_1).state);
+          bool ato_empty       = (f1role == "ATO Empty"       && !id(float_1).state);
+          bool drainage_full   = (f2role == "Drainage Full"   && !id(float_2).state);
           // Water Level Failsafe: EITHER the level sensor OR float 2 reading full
           // (both OFF) counts as "over level" and must stop ATO top-up / WC fill.
-          bool wl_failsafe = (f2role == "Water Level Failsafe" && !id(float_2).state);  // full: OFF = reached
+          bool wl_failsafe = (f2role == "Water Level Failsafe" && !id(float_2).state);
           // ----- DC5: Doser or Cooling Fan -----
           {
             std::string r = id(dc_5_role).current_option();
@@ -2639,7 +2622,7 @@ interval:
             } else if (id(rf_paused)) {
               id(dc_out4).turn_off();
             } else {
-              bool reservoir_full = !id(float_2).state;   // Reservoir Full: OFF = full
+              bool reservoir_full = !id(float_2).state;   // OFF = reservoir full
               float rfmax = id(rf_max_runtime).state;
               if (reservoir_full) {
                 id(dc_out4).turn_off();
@@ -2687,8 +2670,8 @@ interval:
               // Paused by user/leak, or held during a water change.
               id(dc_out8).turn_off();
             } else {
-              // ATO Full float (role): OFF = level reached. Failsafe is an extra cutoff.
-              bool ato_full = (id(float_1).state == false) || wl_failsafe;
+              // ATO Full float: OFF = level reached. Failsafe is an extra cutoff.
+              bool ato_full = (!id(float_1).state) || wl_failsafe;
               float asmax = id(as_max_runtime).state;
               if (ato_full) {
                 id(dc_out8).turn_off();
