@@ -1950,12 +1950,27 @@ binary_sensor:
       - delayed_on: 200ms
       - delayed_off: 2s
   # ---- Level inputs ----
-  # CONVENTION: every level input reads OFF when its condition is fulfilled, and
-  # ON when it is not. The switches are pulled up and close on the condition, so
-  # a disconnected or failed input sits ON = "condition not met". Nothing is
-  # inverted for display — what the UI shows IS the value the logic uses.
+  # CONVENTION: every level input reads OFF when its condition is fulfilled, ON
+  # when it is not — AND a disconnected input must also read OFF, so a broken or
+  # unplugged sensor is treated as "condition met" and stops the process rather
+  # than letting it run blind. That is the fail-safe direction for all six roles:
+  #   Reservoir Empty / ATO Empty  -> OFF = empty   (stop drawing)
+  #   Reservoir Full / ATO Full    -> OFF = full    (stop filling)
+  #   Drainage Full                -> OFF = full    (stop draining)
+  #   Water Level Failsafe         -> OFF = at level (stop topping up / filling)
+  #
+  # The inputs are pulled up, so an open switch — and an unplugged one — sits
+  # HIGH. Inverting at the pin turns that into OFF = condition met, including on
+  # a disconnect. WIRING REQUIREMENT: each float must be OPEN when its condition
+  # is fulfilled (empty floats open when they drop, full floats open when they
+  # rise), which is set by the float's orientation on its stem.
+  #
+  # Nothing is inverted for display — what the UI shows IS the value the logic
+  # uses, so an unplugged float reads OFF on screen as well.
   - platform: gpio
-    pin: GPIO36
+    pin:
+      number: GPIO36
+      inverted: true
     id: float_1
     name: "Float 1"
     web_server: {sorting_group_id: grp_status, sorting_weight: 50}
@@ -1963,7 +1978,9 @@ binary_sensor:
       - delayed_on: 500ms
       - delayed_off: 500ms
   - platform: gpio
-    pin: GPIO39
+    pin:
+      number: GPIO39
+      inverted: true
     id: float_2
     name: "Float 2"
     web_server: {sorting_group_id: grp_status, sorting_weight: 60}
@@ -2327,8 +2344,9 @@ interval:
           std::string f1role = id(float_1_role).current_option();
           std::string f2role = id(float_2_role).current_option();
           // All float conditions are TRUE when the input reads OFF (see convention
-          // at the binary_sensor definitions): the switch closes on the condition,
-          // so a disconnect sits ON and reads as "condition not met".
+          // at the binary_sensor definitions). The pins are inverted, so an open
+          // switch AND a disconnected one both read OFF — a failed or unplugged
+          // float is therefore treated as "condition met" and stops the process.
           bool reservoir_empty = (f1role == "Reservoir Empty" && !id(float_1).state);
           bool ato_empty       = (f1role == "ATO Empty"       && !id(float_1).state);
           bool drainage_full   = (f2role == "Drainage Full"   && !id(float_2).state);

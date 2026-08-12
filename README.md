@@ -99,12 +99,29 @@ See **[RELEASING.md](RELEASING.md)** for the full pipeline and the one-time Page
 
 ### Level input convention
 
-Every level input reads **OFF when its condition is met**, and ON when it is not. The
-switches are pulled up and close on the condition, so a disconnected or failed input
-sits ON — read as *"condition not met"* — rather than silently reporting a level it
-cannot see. The optical sensor's module output is the opposite way round, so it is
-inverted at the pin to match. Nothing is inverted for display: what the UI shows is the
-value the control logic uses.
+Every level input reads **OFF when its condition is met**, ON when it is not — and a
+**disconnected input also reads OFF**, so a broken or unplugged sensor is treated as
+"condition met" and stops the process rather than letting it run blind.
+
+| Role | OFF means |
+|---|---|
+| Reservoir Empty / ATO Empty | empty — stop drawing |
+| Reservoir Full / ATO Full | full — stop filling |
+| Drainage Full | waste container full — stop draining |
+| Water Level Failsafe | at level — stop topping up / filling |
+
+The inputs are pulled up, so an open switch — and an unplugged one — sits HIGH.
+Inverting at the pin turns that into `OFF = condition met`, including on a disconnect.
+The optical level sensor is inverted for the same reason: its module output is ON when
+submerged, the opposite way round.
+
+**Wiring requirement:** each float must be **open when its condition is fulfilled** —
+empty floats open as they drop, full floats open as they rise. That is set by the
+float's orientation on its stem, so verify each one by hand: with the condition met the
+tile should read OFF, and unplugging it should leave it OFF.
+
+Nothing is inverted for display — what the UI shows is the value the control logic
+uses.
 
 ---
 
