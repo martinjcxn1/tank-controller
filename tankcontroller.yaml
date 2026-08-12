@@ -44,6 +44,12 @@ esp32:
     # reason to shrink them. Leave this stock.
 logger:
   level: INFO
+  logs:
+    # The HX711 (CO2 bottle scale) logs "DOUT pin not high" at WARN on every read
+    # attempt when no load cell is connected. At a 1s update interval that floods
+    # the log and buries everything else, so drop this component to ERROR. Genuine
+    # errors still show, and CO2 Weight still reads NaN if the cell is absent.
+    hx711: ERROR
 api:
   # Default is reboot_timeout: 15min — the device reboots if no API client
   # (Home Assistant) ever connects. This unit runs standalone off its web
@@ -237,6 +243,29 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
+  # True while the ATO is the thing driving its output. Used so the ATO only ever
+  # switches an output OFF that it switched ON itself — otherwise the fresh-water
+  # ATO (which shares the filling pump) would fight the water change and make the
+  # manual Filling Pump switch unusable.
+  - id: ato_running
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Last-seen role for each dual-role output, so a role CHANGE can de-energise the
+  # output once. Without this, switching e.g. DC6 from CO2 to Doser while the CO2
+  # valve is open leaves it open forever (the Doser branch only checks a schedule).
+  - id: dc5_prev_fn
+    type: bool
+    restore_value: false
+    initial_value: 'true'
+  - id: dc6_prev_fn
+    type: bool
+    restore_value: false
+    initial_value: 'true'
+  - id: dc7_prev_fn
+    type: bool
+    restore_value: false
+    initial_value: 'true'
   # True when the pause was caused by hitting ATO Max Runtime rather than by the
   # user, so the status/log can name the real reason while it waits to be cleared.
   - id: ato_cap_latch
@@ -2309,6 +2338,14 @@ interval:
           // ----- DC5: Doser or Cooling Fan -----
           {
             std::string r = id(dc_5_role).current_option();
+            // A role change de-energises the output once, so a running fan can't be
+            // stranded ON by switching to Doser (and vice versa for a live dose).
+            bool fn = (r == "Cooling Fan");
+            if (fn != id(dc5_prev_fn)) {
+              id(dc5_prev_fn) = fn;
+              id(dc_out5).turn_off();
+              ESP_LOGW("dc5", "Role changed to %s — output switched off", r.c_str());
+            }
             if (r == "Cooling Fan") {
               if (id(cool_on)) id(dc_out5).turn_on(); else id(dc_out5).turn_off();
             } else if (r == "Doser") {
@@ -2324,6 +2361,14 @@ interval:
           // ----- DC6: Doser or CO2 -----
           {
             std::string r = id(dc_6_role).current_option();
+            // Critical: without this, switching CO2 -> Doser with the valve open
+            // leaves it open indefinitely and gasses the tank.
+            bool fn = (r == "CO2");
+            if (fn != id(dc6_prev_fn)) {
+              id(dc6_prev_fn) = fn;
+              id(dc_out6).turn_off();
+              ESP_LOGW("dc6", "Role changed to %s — output switched off", r.c_str());
+            }
             if (r == "CO2") {
               auto on = id(co2_on_time).state_as_esptime();
               auto off = id(co2_off_time).state_as_esptime();
@@ -2346,6 +2391,15 @@ interval:
           // filling pump (Salt Water off).
           {
             std::string r = id(dc_7_role).current_option();
+            // Role change de-energises DC7 once, so an in-progress top-up can't be
+            // stranded ON by switching to Doser.
+            bool fn = (r == "ATO");
+            if (fn != id(dc7_prev_fn)) {
+              id(dc7_prev_fn) = fn;
+              id(dc_out7).turn_off();
+              id(ato_running) = false;
+              ESP_LOGW("dc7", "Role changed to %s — output switched off", r.c_str());
+            }
             if (r == "Doser") {
               if (time_ok) {
                 auto dt = id(dose_time_7).state_as_esptime();
@@ -2371,6 +2425,7 @@ interval:
             int areason = 0;              // 0 = topping up
             if (!run_ato) {
               areason = 1;                // DC7 not in ATO role (salt water mode)
+              if (id(ato_running)) { id(dc_out7).turn_off(); id(ato_running) = false; }
             } else {
               esphome::switch_::Switch *ato_out = saltwater
                   ? (esphome::switch_::Switch*) id(dc_out7)
@@ -2378,34 +2433,43 @@ interval:
               bool needs_water = id(water_level).state;
               float maxrt = id(ato_max_runtime).state;
               bool allowed = id(ato_enable).state || id(ato_topup_now);
+              // Only switch the output off if the ATO is what switched it on. In
+              // fresh-water mode this output is the shared filling pump, so an
+              // unconditional turn_off() every tick would block manual use of that
+              // pump and fight the water-change state machine for control of it.
+              auto ato_release = [&]() {
+                if (id(ato_running)) { ato_out->turn_off(); id(ato_running) = false; }
+              };
               if (id(wc_active))      areason = 2;
               else if (leak)          areason = 3;
               else if (wl_failsafe)   areason = 4;
               else if (ato_empty)     areason = 5;
               else if (id(ato_paused)) areason = id(ato_cap_latch) ? 9 : 6;
               if (areason != 0) {
-                ato_out->turn_off();        // blocked
+                ato_release();              // blocked
                 id(ato_runtime) = 0;
                 id(ato_topup_now) = false;  // cancel any manual request while blocked
               } else if (!needs_water) {
                 areason = 7;                // tank full
-                ato_out->turn_off();
+                ato_release();
                 id(ato_runtime) = 0;
                 id(ato_topup_now) = false;  // manual request satisfied
               } else if (!allowed) {
                 areason = 8;                // ATO disabled and no manual request
-                ato_out->turn_off();
+                ato_release();
+                id(ato_runtime) = 0;        // fresh allowance next time it's enabled
               } else if (id(ato_runtime) >= maxrt) {
                 // Safety cap hit: stop the ATO the same way the Stop button does.
                 // It stays stopped until the user clears it (Continue / Top Up
                 // Now / Cancel), so a runaway top-up can't quietly resume.
                 areason = 9;
-                ato_out->turn_off();
+                ato_release();
                 id(ato_topup_now) = false;
                 id(ato_paused)    = true;
                 id(ato_cap_latch) = true;
               } else {
                 ato_out->turn_on();
+                id(ato_running) = true;
                 id(ato_runtime) += 1;       // interval is 1s
               }
             }
