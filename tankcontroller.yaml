@@ -812,7 +812,7 @@ select:
     optimistic: true
     restore_value: true
     options: ["Off", "Always On", "Scheduled", "Heater"]
-    initial_option: "Off"
+    initial_option: "Always On"
   - platform: template
     id: ac_3_mode
     name: "AC 3 Mode"
@@ -828,7 +828,7 @@ select:
     optimistic: true
     restore_value: true
     options: ["Off", "Always On", "Scheduled", "Heater"]
-    initial_option: "Off"
+    initial_option: "Always On"
   # ---- Action During Maintenance Mode ----
   # Only AC relays, CO2 and the Cooling Fan are settable. Dosers and the water
   # change machinery are deliberately excluded. CO2 / Cooling Fan apply only
@@ -1160,13 +1160,14 @@ switch:
   # inverted so the switch still means equipment state: ON = relay released
   # (equipment running), OFF = relay energised (equipment stopped).
   # NOTE: while the ESP is booting, flashing or unpowered the relay is released,
-  # so AC 2 / AC 4 equipment runs during that time.
+  # so AC 2 / AC 4 equipment runs during that time. Both default to running:
+  # RESTORE_DEFAULT_ON here, and AC 2 / AC 4 Mode default to "Always On".
   - platform: gpio
     id: AC_2
     name: "AC_2"
     web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 24}
     pin: {number: GPIO17, mode: {output: true}, inverted: true}
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
   - platform: gpio
     id: AC_3
     name: "AC_3"
@@ -1178,7 +1179,7 @@ switch:
     name: "AC_4"
     web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 44}
     pin: {number: GPIO19, mode: {output: true}, inverted: true}  # NC contact — see AC_2
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: RESTORE_DEFAULT_ON
   # ---- Lid LEDs disabled (expander commented out above) ----
 #  - platform: gpio
 #    name: led1
