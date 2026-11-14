@@ -242,8 +242,12 @@ time:
   # platform). Seeds system time at boot when offline and re-reads periodically,
   # keeping scheduling/dosing/midnight-reset working without WiFi/SNTP. SNTP
   # overwrites it whenever the network is available.
+  # Its timezone MUST match the SNTP one. Left unset, ESPHome uses the timezone
+  # of the machine that compiled the firmware — UTC on the GitHub Actions
+  # builder — and that overrides the system timezone, so the clock reads GMT.
   - platform: ds1307
     id: ds3231_time
+    timezone: Africa/Johannesburg
     update_interval: 15min
   # - platform: homeassistant
   #   id: hass_time
@@ -2531,6 +2535,27 @@ interval:
             id(heat_on) = false;
             id(cool_on) = false;
           }
+          // ===== Output overrides (maintenance / WC Action) =====
+          // Each output's final state is worked out first and written ONCE per
+          // tick. Writing the normal state and then the override in the same
+          // tick flipped the relay off-and-on every second (audible clicking).
+          // Maintenance wins; WC Action applies only to a running (not held) WC.
+          // Returns 1 = force on, 0 = force off, -1 = no override.
+          bool maint_on = id(maintenance_mode).state;
+          bool wc_run   = id(wc_active) && !maint_on;
+          auto ov = [&](esphome::select::Select *maint_sel, esphome::select::Select *wc_sel) -> int {
+            std::string a;
+            if (maint_on && maint_sel != nullptr) a = maint_sel->current_option();
+            else if (wc_run && wc_sel != nullptr) a = wc_sel->current_option();
+            else return -1;
+            if (a == "On") return 1;
+            if (a == "Off") return 0;
+            return -1;
+          };
+          // Write only when the state actually changes.
+          auto set_out = [](esphome::switch_::Switch *out, bool want) {
+            if (out->state != want) { if (want) out->turn_on(); else out->turn_off(); }
+          };
           // ===== AC channels =====
           // Manual: the relay follows acN_manual, which is updated whenever the
           // user toggles the switch (detected as a change since the loop last
@@ -2539,7 +2564,8 @@ interval:
           // the manual state once they end.
           auto run_ac = [&](esphome::select::Select *mode_sel, esphome::switch_::Switch *out,
                             esphome::datetime::TimeEntity *on_t, esphome::datetime::TimeEntity *off_t,
-                            bool &manual, int &cmd, int &was_man) {
+                            bool &manual, int &cmd, int &was_man,
+                            esphome::select::Select *maint_sel, esphome::select::Select *wc_sel) {
             std::string m = mode_sel->current_option();
             bool is_man = (m == "Manual");
             if (is_man) {
@@ -2550,25 +2576,28 @@ interval:
               }
             }
             was_man = is_man ? 1 : 0;
-            if (m == "Off") out->turn_off();
-            else if (m == "Always On") out->turn_on();
+            bool want = out->state;
+            if (m == "Off") want = false;
+            else if (m == "Always On") want = true;
             else if (m == "Scheduled") {
               auto on = on_t->state_as_esptime();
               auto off = off_t->state_as_esptime();
-              if (in_window(on.hour, on.minute, off.hour, off.minute)) out->turn_on();
-              else out->turn_off();
+              want = in_window(on.hour, on.minute, off.hour, off.minute);
             }
-            else if (m == "Heater") {
-              if (id(heat_on)) out->turn_on(); else out->turn_off();
-            }
-            else if (is_man) {
-              if (manual) out->turn_on(); else out->turn_off();
-            }
+            else if (m == "Heater") want = id(heat_on);
+            else if (is_man) want = manual;
+            int o = ov(maint_sel, wc_sel);
+            if (o != -1) want = (o == 1);
+            set_out(out, want);
           };
-          run_ac(id(ac_1_mode), id(AC_1), id(ac_1_on_time), id(ac_1_off_time), id(ac1_manual), id(ac1_cmd), id(ac1_was_man));
-          run_ac(id(ac_2_mode), id(AC_2), id(ac_2_on_time), id(ac_2_off_time), id(ac2_manual), id(ac2_cmd), id(ac2_was_man));
-          run_ac(id(ac_3_mode), id(AC_3), id(ac_3_on_time), id(ac_3_off_time), id(ac3_manual), id(ac3_cmd), id(ac3_was_man));
-          run_ac(id(ac_4_mode), id(AC_4), id(ac_4_on_time), id(ac_4_off_time), id(ac4_manual), id(ac4_cmd), id(ac4_was_man));
+          run_ac(id(ac_1_mode), id(AC_1), id(ac_1_on_time), id(ac_1_off_time), id(ac1_manual), id(ac1_cmd), id(ac1_was_man),
+                 id(ac_1_maint), id(ac_1_wc));
+          run_ac(id(ac_2_mode), id(AC_2), id(ac_2_on_time), id(ac_2_off_time), id(ac2_manual), id(ac2_cmd), id(ac2_was_man),
+                 id(ac_2_maint), id(ac_2_wc));
+          run_ac(id(ac_3_mode), id(AC_3), id(ac_3_on_time), id(ac_3_off_time), id(ac3_manual), id(ac3_cmd), id(ac3_was_man),
+                 id(ac_3_maint), id(ac_3_wc));
+          run_ac(id(ac_4_mode), id(AC_4), id(ac_4_on_time), id(ac_4_off_time), id(ac4_manual), id(ac4_cmd), id(ac4_was_man),
+                 id(ac_4_maint), id(ac_4_wc));
           // ===== DC 5–8 role dispatch =====
           auto now = id(sntp_time).now();
           bool time_ok = now.is_valid();
@@ -2611,7 +2640,10 @@ interval:
               ESP_LOGW("dc5", "Role changed to %s — output switched off", r.c_str());
             }
             if (r == "Cooling Fan") {
-              if (id(cool_on)) id(dc_out5).turn_on(); else id(dc_out5).turn_off();
+              bool want = id(cool_on);
+              int o = ov(id(fan_maint), nullptr);
+              if (o != -1) want = (o == 1);
+              set_out(id(dc_out5), want);
             } else if (r == "Doser") {
               if (time_ok) {
                 auto dt = id(dose_time_5).state_as_esptime();
@@ -2636,8 +2668,10 @@ interval:
             if (r == "CO2") {
               auto on = id(co2_on_time).state_as_esptime();
               auto off = id(co2_off_time).state_as_esptime();
-              if (in_window(on.hour, on.minute, off.hour, off.minute)) id(dc_out6).turn_on();
-              else id(dc_out6).turn_off();
+              bool want = in_window(on.hour, on.minute, off.hour, off.minute);
+              int o = ov(id(co2_maint), id(dc_6_wc));
+              if (o != -1) want = (o == 1);
+              set_out(id(dc_out6), want);
             } else if (r == "Doser") {
               if (time_ok) {
                 auto dt = id(dose_time_6).state_as_esptime();
@@ -3042,37 +3076,15 @@ interval:
               }
             }
           }
-          // ===== WC Action overrides =====
-          // Runs after normal AC/DC control so it wins during a water change.
-          // Skipped while a WC is held for maintenance (it isn't running).
-          // "No Change" leaves normal control alone.
-          auto apply = [](esphome::select::Select *sel, esphome::switch_::Switch *out) {
-            std::string a = sel->current_option();
-            if (a == "On") out->turn_on();
-            else if (a == "Off") out->turn_off();
-          };
-          if (id(wc_active) && !id(maintenance_mode).state) {
-            apply(id(ac_1_wc), id(AC_1));
-            apply(id(ac_2_wc), id(AC_2));
-            apply(id(ac_3_wc), id(AC_3));
-            apply(id(ac_4_wc), id(AC_4));
-            std::string a6 = id(dc_6_wc).current_option();
-            if (a6 == "Off") id(dc_out6).turn_off();
-            else if (a6 == "On" && id(dc_6_role).current_option() == "CO2") id(dc_out6).turn_on();
-            if (id(dc_8_wc).current_option() == "Off") id(dc_out8).turn_off();
-          }
-          // ===== Maintenance mode overrides =====
-          // Runs after everything else (including the WC force-off) so the
-          // maintenance setting wins. "No Change" leaves normal control alone.
-          if (id(maintenance_mode).state) {
-            apply(id(ac_1_maint), id(AC_1));
-            apply(id(ac_2_maint), id(AC_2));
-            apply(id(ac_3_maint), id(AC_3));
-            apply(id(ac_4_maint), id(AC_4));
-            if (id(dc_6_role).current_option() == "CO2")
-              apply(id(co2_maint), id(dc_out6));
-            if (id(dc_5_role).current_option() == "Cooling Fan")
-              apply(id(fan_maint), id(dc_out5));
+          // ===== WC Action for DC 6 / DC 8 outside their switched roles =====
+          // AC 1-4, CO2 and the fan take their overrides above. Here only the
+          // "Off" WC Action is applied to DC 6 as a doser and to DC 8 (doser /
+          // ATO Fill), which are never forced on.
+          if (wc_run) {
+            if (id(dc_6_role).current_option() != "CO2" && id(dc_6_wc).current_option() == "Off")
+              set_out(id(dc_out6), false);
+            if (id(dc_8_wc).current_option() == "Off")
+              set_out(id(dc_out8), false);
           }
           // Remember what the loop left each AC relay at, so a user toggle in
           // Manual mode can be told apart from the loop's own switching.
