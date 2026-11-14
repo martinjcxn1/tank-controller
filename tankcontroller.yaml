@@ -1155,11 +1155,17 @@ switch:
     web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 14}
     pin: {number: GPIO16, mode: {output: true}}
     restore_mode: RESTORE_DEFAULT_OFF
+  # AC 2 and AC 4 have their equipment wired to the relay's NC (normally closed)
+  # contact, so the equipment is ON while the relay is released. The pin is
+  # inverted so the switch still means equipment state: ON = relay released
+  # (equipment running), OFF = relay energised (equipment stopped).
+  # NOTE: while the ESP is booting, flashing or unpowered the relay is released,
+  # so AC 2 / AC 4 equipment runs during that time.
   - platform: gpio
     id: AC_2
     name: "AC_2"
     web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 24}
-    pin: {number: GPIO17, mode: {output: true}}
+    pin: {number: GPIO17, mode: {output: true}, inverted: true}
     restore_mode: RESTORE_DEFAULT_OFF
   - platform: gpio
     id: AC_3
@@ -1171,7 +1177,7 @@ switch:
     id: AC_4
     name: "AC_4"
     web_server: {sorting_group_id: grp_ac_outputs, sorting_weight: 44}
-    pin: {number: GPIO19, mode: {output: true}}
+    pin: {number: GPIO19, mode: {output: true}, inverted: true}  # NC contact — see AC_2
     restore_mode: RESTORE_DEFAULT_OFF
   # ---- Lid LEDs disabled (expander commented out above) ----
 #  - platform: gpio
