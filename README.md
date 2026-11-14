@@ -36,7 +36,7 @@ selected at runtime from the web UI.
   Heater and the fan on DC 5.
 
 Every automation shares the same interlocks: a leak, an empty reservoir, a full waste
-container or a high-level failsafe pauses it, and it resumes with **Continue**.
+container or the Tank Water Level float pauses it, and it resumes with **Continue**.
 
 ---
 
@@ -108,7 +108,7 @@ Every level input reads **OFF when its condition is met**, ON when it is not —
 | Reservoir Empty / ATO Empty | empty — stop drawing |
 | Reservoir Full / ATO Full | full — stop filling |
 | Drainage Full | waste container full — stop draining |
-| Water Level Failsafe | at level — stop topping up / filling |
+| Tank Water Level | at level — stop topping up / filling |
 
 The inputs are pulled up, so an open switch — and an unplugged one — sits HIGH.
 Inverting at the pin turns that into `OFF = condition met`, including on a disconnect.

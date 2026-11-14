@@ -1,6 +1,6 @@
 substitutions:
-  name: tankcontroller
-  friendly_name: "Tank Controller"
+  name: autoreef
+  friendly_name: "AutoReef"
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
@@ -50,13 +50,13 @@ logger:
     # the log and buries everything else, so drop this component to ERROR. Genuine
     # errors still show, and CO2 Weight still reads NaN if the cell is absent.
     hx711: ERROR
-api:
-  # Default is reboot_timeout: 15min — the device reboots if no API client
-  # (Home Assistant) ever connects. This unit runs standalone off its web
-  # interface, so that watchdog must be disabled or it reboots every 15 min.
-  reboot_timeout: 0s
+# api:
+#   # Default is reboot_timeout: 15min — the device reboots if no API client
+#   # (Home Assistant) ever connects. This unit runs standalone off its web
+#   # interface, so that watchdog must be disabled or it reboots every 15 min.
+#   reboot_timeout: 0s
 ota:
-  - platform: esphome
+  # - platform: esphome
   - platform: web_server
   # Lets the device pull a compiled binary from a URL and self-flash. This is
   # what the owner-triggered "Install Firmware Update" button uses.
@@ -106,6 +106,9 @@ web_server:
     - id: grp_status
       name: "Status & Sensors"
       sorting_weight: 10
+    - id: grp_maintenance
+      name: "Maintenance"
+      sorting_weight: 12
     - id: grp_temp
       name: "Temperature Control"
       sorting_weight: 15
@@ -217,8 +220,8 @@ time:
   - platform: ds1307
     id: ds3231_time
     update_interval: 15min
-  - platform: homeassistant
-    id: hass_time
+  # - platform: homeassistant
+  #   id: hass_time
 globals:
   - id: hx_offset
     type: float
@@ -314,8 +317,8 @@ globals:
     restore_value: true
     initial_value: 'false'
   # Set when a fill must ignore the level sensor as its stop condition (fallback
-  # fill after the level never cleared). Fill is then bounded only by the Water
-  # Level Failsafe and the max fill time.
+  # fill after the level never cleared). Fill is then bounded only by the Tank
+  # Water Level float (if selected) and the max fill time.
   - id: wc_fill_force
     type: bool
     restore_value: true
@@ -806,6 +809,58 @@ select:
     restore_value: true
     options: ["Off", "Always On", "Scheduled", "Heater"]
     initial_option: "Off"
+  # ---- Action During Maintenance Mode ----
+  # Only AC relays, CO2 and the Cooling Fan are settable. Dosers and the water
+  # change machinery are deliberately excluded. CO2 / Cooling Fan apply only
+  # while DC6 / DC5 is in that role, so a doser output is never forced on.
+  - platform: template
+    id: ac_1_maint
+    name: "AC 1 Action During Maintenance Mode"
+    web_server: {sorting_group_id: grp_maintenance, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    options: ["On", "Off", "No Change"]
+    initial_option: "No Change"
+  - platform: template
+    id: ac_2_maint
+    name: "AC 2 Action During Maintenance Mode"
+    web_server: {sorting_group_id: grp_maintenance, sorting_weight: 30}
+    optimistic: true
+    restore_value: true
+    options: ["On", "Off", "No Change"]
+    initial_option: "No Change"
+  - platform: template
+    id: ac_3_maint
+    name: "AC 3 Action During Maintenance Mode"
+    web_server: {sorting_group_id: grp_maintenance, sorting_weight: 40}
+    optimistic: true
+    restore_value: true
+    options: ["On", "Off", "No Change"]
+    initial_option: "No Change"
+  - platform: template
+    id: ac_4_maint
+    name: "AC 4 Action During Maintenance Mode"
+    web_server: {sorting_group_id: grp_maintenance, sorting_weight: 50}
+    optimistic: true
+    restore_value: true
+    options: ["On", "Off", "No Change"]
+    initial_option: "No Change"
+  - platform: template
+    id: co2_maint
+    name: "CO2 Action During Maintenance Mode"
+    web_server: {sorting_group_id: grp_maintenance, sorting_weight: 60}
+    optimistic: true
+    restore_value: true
+    options: ["On", "Off", "No Change"]
+    initial_option: "No Change"
+  - platform: template
+    id: fan_maint
+    name: "Fan Action During Maintenance Mode"
+    web_server: {sorting_group_id: grp_maintenance, sorting_weight: 70}
+    optimistic: true
+    restore_value: true
+    options: ["On", "Off", "No Change"]
+    initial_option: "No Change"
   # DC 5–8 role selects
   - platform: template
     id: dc_5_role
@@ -850,8 +905,9 @@ select:
     initial_option: "Doser"
   # ---- Float sensor roles ----
   # Only three roles currently drive logic: "Reservoir Empty" and "Drainage Full"
-  # stop a water change; "Water Level Failsafe" acts as a redundant high-level
-  # cutoff for the ATO and WC fill. The others are reserved (no action yet).
+  # stop a water change; "Tank Water Level" is a redundant high-level cutoff for
+  # the ATO and WC fill while the optical sensor is enabled, and the tank level
+  # sensor itself when it is disabled. The others are reserved (no action yet).
   - platform: template
     id: float_1_role
     name: "Float 1 Role"
@@ -866,7 +922,7 @@ select:
     web_server: {sorting_group_id: grp_settings, sorting_weight: 120}
     optimistic: true
     restore_value: true
-    options: ["Reservoir Full", "Drainage Full", "Water Level Failsafe"]
+    options: ["Reservoir Full", "Drainage Full", "Tank Water Level"]
     initial_option: "Reservoir Full"
 datetime:
   - platform: template
@@ -1245,6 +1301,15 @@ switch:
     web_server: {sorting_group_id: grp_ato, sorting_weight: 20}
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
+  # Optical level sensor fitted. OFF = the optical sensor (GPIO34) is ignored and
+  # Float 2 in the "Tank Water Level" role becomes the tank level sensor. With
+  # neither, the ATO cannot run and WC fills are timed (max fill time) only.
+  - platform: template
+    id: optical_enable
+    name: "Optical Level Sensor"
+    web_server: {sorting_group_id: grp_settings, sorting_weight: 105}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
   # ---- Outputs to force off during a water change (simultaneous or not) ----
   - platform: template
     id: ac1_off_wc
@@ -1282,6 +1347,22 @@ switch:
     web_server: {sorting_group_id: grp_dc_outputs, sorting_weight: 41}
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
+  # Maintenance mode: while ON, each AC relay, CO2 (DC6) and the Cooling Fan
+  # (DC5) is forced to its "Action During Maintenance Mode" setting, the ATO
+  # top-up is suspended, and any water change (running, scheduled or started by
+  # hand) is held with its pumps off until maintenance is switched off. Restored
+  # across reboots so a power blip mid-maintenance doesn't restart equipment.
+  - platform: template
+    id: maintenance_mode
+    name: "Maintenance Mode"
+    icon: "mdi:wrench"
+    web_server: {sorting_group_id: grp_maintenance, sorting_weight: 10}
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - logger.log: {format: "Maintenance mode ON", level: WARN, tag: maint}
+    on_turn_off:
+      - logger.log: {format: "Maintenance mode OFF — normal control resumed", level: WARN, tag: maint}
 button:
   # Owner-triggered firmware update. Re-checks the GitHub Release manifest, then
   # installs only if a newer version is advertised — a press on the latest
@@ -1957,7 +2038,7 @@ binary_sensor:
   #   Reservoir Empty / ATO Empty  -> OFF = empty   (stop drawing)
   #   Reservoir Full / ATO Full    -> OFF = full    (stop filling)
   #   Drainage Full                -> OFF = full    (stop draining)
-  #   Water Level Failsafe         -> OFF = at level (stop topping up / filling)
+  #   Tank Water Level             -> OFF = at level (stop topping up / filling)
   #
   # The inputs are pulled up, so an open switch — and an unplugged one — sits
   # HIGH. Inverting at the pin turns that into OFF = condition met, including on
@@ -2169,6 +2250,8 @@ text_sensor:
           return std::string("paused: drainage full (float 2)");
         return std::string("paused by user — press Continue");
       }
+      if (id(maintenance_mode).state)
+        return std::string("waiting: maintenance mode — resumes when switched off");
       float R = id(wc_fill_ratio).state;
       float D = id(wc_drain_seconds).state;
       bool sim = id(wc_simultaneous).state;
@@ -2204,12 +2287,14 @@ text_sensor:
         case 1: return std::string("idle: DC7 not in ATO role");
         case 2: return std::string("blocked: water change active");
         case 3: return std::string("blocked: leak detected");
-        case 4: return std::string("blocked: water level failsafe (float 2)");
+        case 4: return std::string("blocked: tank water level (float 2)");
         case 5: return std::string("blocked: ATO source empty (float 1)");
         case 6: return std::string("stopped by user");
         case 7: return std::string("idle: tank full");
         case 8: return std::string("idle: ATO disabled");
         case 9: return std::string("stopped: max runtime reached — press Continue");
+        case 10: return std::string("idle: no tank level sensor");
+        case 11: return std::string("suspended: maintenance mode");
       }
       return std::string("starting up");
 climate:
@@ -2350,9 +2435,19 @@ interval:
           bool reservoir_empty = (f1role == "Reservoir Empty" && !id(float_1).state);
           bool ato_empty       = (f1role == "ATO Empty"       && !id(float_1).state);
           bool drainage_full   = (f2role == "Drainage Full"   && !id(float_2).state);
-          // Water Level Failsafe: EITHER the level sensor OR float 2 reading full
-          // (both OFF) counts as "over level" and must stop ATO top-up / WC fill.
-          bool wl_failsafe = (f2role == "Water Level Failsafe" && !id(float_2).state);
+          // ----- Tank level source -----
+          // Optical sensor enabled: it is the tank level sensor, and Float 2 in
+          // the "Tank Water Level" role is a redundant high-level cutoff —
+          // EITHER reading full (OFF) stops ATO top-up / WC fill.
+          // Optical sensor disabled: Float 2 in "Tank Water Level" role is the
+          // tank level sensor itself. With neither, there is no level sensor.
+          bool optical_on  = id(optical_enable).state;
+          bool tank_float  = (f2role == "Tank Water Level");
+          bool has_level   = optical_on || tank_float;
+          // level_low: ON = below level / needs water (same polarity as both inputs).
+          bool level_low   = optical_on ? id(water_level).state
+                           : (tank_float ? id(float_2).state : false);
+          bool tank_level_full = (optical_on && tank_float && !id(float_2).state);
           // ----- DC5: Doser or Cooling Fan -----
           {
             std::string r = id(dc_5_role).current_option();
@@ -2435,7 +2530,8 @@ interval:
           //   water top-off, keeping salinity stable).
           // Salt Water OFF: runs regardless of DC7 role, driving the Filling Pump.
           // Sensor semantics (fail-safe): water_level ON = dry (top up), OFF/fault
-          // = stop. Blocked by water change / leak / failsafe / ATO source empty;
+          // = stop. Blocked by water change / leak / no level sensor / tank water
+          // level float / ATO source empty;
           // needs ATO Enabled or a manual Top Up Now; capped by ATO Max Runtime.
           {
             bool saltwater = id(salt_water).state;
@@ -2448,7 +2544,7 @@ interval:
               esphome::switch_::Switch *ato_out = saltwater
                   ? (esphome::switch_::Switch*) id(dc_out7)
                   : (esphome::switch_::Switch*) id(dc_out2);
-              bool needs_water = id(water_level).state;
+              bool needs_water = level_low;
               float maxrt = id(ato_max_runtime).state;
               bool allowed = id(ato_enable).state || id(ato_topup_now);
               // Only switch the output off if the ATO is what switched it on. In
@@ -2458,9 +2554,11 @@ interval:
               auto ato_release = [&]() {
                 if (id(ato_running)) { ato_out->turn_off(); id(ato_running) = false; }
               };
-              if (id(wc_active))      areason = 2;
+              if (id(maintenance_mode).state) areason = 11;
+              else if (id(wc_active)) areason = 2;
               else if (leak)          areason = 3;
-              else if (wl_failsafe)   areason = 4;
+              else if (!has_level)    areason = 10;
+              else if (tank_level_full)   areason = 4;
               else if (ato_empty)     areason = 5;
               else if (id(ato_paused)) areason = id(ato_cap_latch) ? 9 : 6;
               if (areason != 0) {
@@ -2499,12 +2597,14 @@ interval:
                 case 1: ESP_LOGI("ato", "Idle: DC7 not in ATO role"); break;
                 case 2: ESP_LOGW("ato", "Blocked: water change active"); break;
                 case 3: ESP_LOGW("ato", "Blocked: leak detected"); break;
-                case 4: ESP_LOGW("ato", "Blocked: water level failsafe (float 2 at level)"); break;
+                case 4: ESP_LOGW("ato", "Blocked: tank water level (float 2 at level)"); break;
                 case 5: ESP_LOGW("ato", "Blocked: ATO source empty (float 1)"); break;
                 case 6: ESP_LOGW("ato", "Stopped by user (ATO: Stop)"); break;
                 case 7: ESP_LOGI("ato", "Idle: tank full"); break;
                 case 8: ESP_LOGI("ato", "Idle: ATO disabled"); break;
                 case 9: ESP_LOGW("ato", "STOPPED: max runtime reached — ATO is off until you press Continue"); break;
+                case 10: ESP_LOGW("ato", "Idle: no tank level sensor (optical disabled, Float 2 not Tank Water Level)"); break;
+                case 11: ESP_LOGW("ato", "Suspended: maintenance mode"); break;
               }
             }
           }
@@ -2593,7 +2693,9 @@ interval:
                 ESP_LOGW("wc", "Water change stopped: drainage container full (float 2)");
               }
             }
-            if (id(wc_paused)) {
+            if (id(wc_paused) || id(maintenance_mode).state) {
+              // Paused (needs Continue), or held for maintenance mode (resumes
+              // by itself, from where it left off, once maintenance is off).
               id(dc_out1).turn_off();
               id(dc_out2).turn_off();
             } else {
@@ -2615,21 +2717,23 @@ interval:
                   bool startfill = false;
                   if (sim) {
                     // Wait for the level sensor to clear (drop below normal =>
-                    // water_level ON/dry), then delay before filling.
+                    // level_low ON/dry), then delay before filling. With no level
+                    // sensor it can never clear, so the fallback below fills
+                    // after the drain on time alone.
                     if (!id(wc_clear_seen)) {
-                      if (id(water_level).state == true) {
+                      if (has_level && level_low) {
                         id(wc_clear_seen) = true;
                       } else if (id(wc_drain_done)) {
                         // Drain finished but the level never cleared. Fill anyway
                         // rather than leaving the tank drained. The level sensor
                         // already reads full so it can't be the stop condition —
-                        // the Water Level Failsafe (if that role is selected) and
+                        // the Tank Water Level float (if selected) and
                         // the max fill time bound this fill instead.
                         id(wc_clear_seen)   = true;
                         id(wc_fill_force)   = true;
                         id(wc_fill_started) = true;
                         id(wc_fill_elapsed) = 0;
-                        ESP_LOGW("wc", "Level never cleared — filling anyway (failsafe + max time only)");
+                        ESP_LOGW("wc", "Level never cleared — filling anyway (tank water level float + max time only)");
                       }
                     } else {
                       // ratio > 1 (fill slower than drain): start almost at once so
@@ -2655,14 +2759,15 @@ interval:
                 if (id(wc_fill_started) && !id(wc_fill_done)) {
                   id(dc_out2).turn_on();
                   id(wc_fill_elapsed) += 1;
-                  // End of fill = level reads wet again (water_level OFF), the
-                  // high-level failsafe (float 2) trips, or the max fill cap.
+                  // End of fill = level reads wet again (level_low OFF), the
+                  // Tank Water Level float (float 2) trips, or the max fill cap.
                   // The level sensor is only ignored on a fallback fill (the
                   // level never cleared, so the sensor already reads full and
                   // can't be a meaningful stop) — that fill runs on time alone,
-                  // still bounded by the failsafe and the max fill time.
-                  if ((!id(wc_fill_force) && id(water_level).state == false)
-                      || wl_failsafe || id(wc_fill_elapsed) >= maxfill) {
+                  // still bounded by the float and the max fill time. With no
+                  // level sensor at all, the fill is timed (max fill) only.
+                  if ((!id(wc_fill_force) && has_level && !level_low)
+                      || tank_level_full || id(wc_fill_elapsed) >= maxfill) {
                     id(dc_out2).turn_off();
                     id(wc_fill_done) = true;
                     ESP_LOGI("wc", "Fill complete");
@@ -2749,7 +2854,7 @@ interval:
           }
           // ===== ATO fill state machine (1s tick) =====
           // Requires Float 1 = ATO Full and DC8 = ATO Fill. Opens DC8 until
-          // the ATO Full float reads full (OFF), the Water Level Failsafe trips,
+          // the ATO Full float reads full (OFF), the Tank Water Level float trips,
           // or ATO Fill Max Runtime. A leak pauses it (resumable); it holds
           // during a water change (auto-resumes); a role change aborts it.
           if (id(as_active)) {
@@ -2767,8 +2872,8 @@ interval:
               // Paused by user/leak, or held during a water change.
               id(dc_out8).turn_off();
             } else {
-              // ATO Full float: OFF = level reached. Failsafe is an extra cutoff.
-              bool ato_full = (!id(float_1).state) || wl_failsafe;
+              // ATO Full float: OFF = level reached. Tank Water Level is an extra cutoff.
+              bool ato_full = (!id(float_1).state) || tank_level_full;
               float asmax = id(as_max_runtime).state;
               if (ato_full) {
                 id(dc_out8).turn_off();
@@ -2787,12 +2892,31 @@ interval:
             }
           }
           // ===== Force selected outputs off during a water change =====
-          // Runs last so it overrides the normal AC/DC control above.
-          if (id(wc_active)) {
+          // Runs last so it overrides the normal AC/DC control above. Skipped
+          // while a WC is held for maintenance (it isn't actually running).
+          if (id(wc_active) && !id(maintenance_mode).state) {
             if (id(ac1_off_wc).state) id(AC_1).turn_off();
             if (id(ac2_off_wc).state) id(AC_2).turn_off();
             if (id(ac3_off_wc).state) id(AC_3).turn_off();
             if (id(ac4_off_wc).state) id(AC_4).turn_off();
             if (id(dc6_off_wc).state) id(dc_out6).turn_off();
             if (id(dc8_off_wc).state) id(dc_out8).turn_off();
+          }
+          // ===== Maintenance mode overrides =====
+          // Runs after everything else (including the WC force-off) so the
+          // maintenance setting wins. "No Change" leaves normal control alone.
+          if (id(maintenance_mode).state) {
+            auto apply = [](esphome::select::Select *sel, esphome::switch_::Switch *out) {
+              std::string a = sel->current_option();
+              if (a == "On") out->turn_on();
+              else if (a == "Off") out->turn_off();
+            };
+            apply(id(ac_1_maint), id(AC_1));
+            apply(id(ac_2_maint), id(AC_2));
+            apply(id(ac_3_maint), id(AC_3));
+            apply(id(ac_4_maint), id(AC_4));
+            if (id(dc_6_role).current_option() == "CO2")
+              apply(id(co2_maint), id(dc_out6));
+            if (id(dc_5_role).current_option() == "Cooling Fan")
+              apply(id(fan_maint), id(dc_out5));
           }

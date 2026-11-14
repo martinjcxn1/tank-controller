@@ -230,7 +230,9 @@ This line tells you exactly what the ATO is doing and, if it is not running, why
 | blocked: leak detected | A leak was found. Fix it before continuing |
 | blocked: water change active | Normal during a water change. It will resume after |
 | blocked: ATO source empty | Your top-up reservoir needs refilling |
-| blocked: water level failsafe | The backup high-level float says the tank is full |
+| blocked: tank water level | The Tank Water Level float (Float 2) says the tank is full |
+| idle: no tank level sensor | Optical Level Sensor is off and Float 2 is not set to Tank Water Level |
+| suspended: maintenance mode | Maintenance Mode is on. Top-ups resume when you switch it off |
 | stopped: max runtime reached | The safety limit was hit and the ATO has stopped itself. Press Continue |
 
 ### ATO Fill (solenoid top-up)
@@ -299,7 +301,7 @@ Drain Only and Fill Only are useful for topping off after maintenance, or for em
 
 ### Water Change Status
 
-Shows the current stage and progress, for example `draining: 45 / 300 s`, `waiting to fill: 12 s left`, or `filling: 88 / 495 s`. If a change has paused it explains why — for example `paused: leak detected` or `paused: reservoir empty (float 1)`.
+Shows the current stage and progress, for example `draining: 45 / 300 s`, `waiting to fill: 12 s left`, or `filling: 88 / 495 s`. If a change has paused it explains why — for example `paused: leak detected` or `paused: reservoir empty (float 1)`. During Maintenance Mode it shows `waiting: maintenance mode`.
 
 ### Turning equipment off during a change
 
@@ -335,7 +337,7 @@ Whatever you choose is displayed above that float in Status & Sensors, so you ca
 
 Each float switches **OFF when its condition is met** — so a float assigned to "Reservoir Empty" reads OFF once the reservoir actually is empty.
 
-A disconnected or failed float also reads OFF, which the controller treats the same way: as though the condition *is* met. That is deliberate. A float that comes loose is assumed to be reporting an empty reservoir, a full waste container or a tank at its failsafe level, so the controller stops rather than carrying on with a sensor it cannot trust. If a process keeps stopping for no obvious reason, check that float's wiring before changing any settings.
+A disconnected or failed float also reads OFF, which the controller treats the same way: as though the condition *is* met. That is deliberate. A float that comes loose is assumed to be reporting an empty reservoir, a full waste container or a tank at its full level, so the controller stops rather than carrying on with a sensor it cannot trust. If a process keeps stopping for no obvious reason, check that float's wiring before changing any settings.
 
 ### Float 1 options
 
@@ -351,7 +353,7 @@ A disconnected or failed float also reads OFF, which the controller treats the s
 |---|---|
 | Reservoir Full | Stops the reservoir refill when full. Required for automatic reservoir filling |
 | Drainage Full | Stops a water change when the waste container is full |
-| Water Level Failsafe | Backup high-level protection. Stops all topping up and filling |
+| Tank Water Level | Tank level float. With the Optical Level Sensor on, it is a backup high-level cutoff that stops all topping up and filling. With it off, it is the tank level sensor the ATO and water-change fill use |
 
 > **Important** — Only choose a role for a float that is actually connected. If you set a role for a float that is not wired in, the controller may think the reservoir is empty or the tank is full and refuse to run.
 
@@ -409,6 +411,17 @@ You can rename each outlet using its **Label** box in Settings, so "AC 1" become
 ### CO2 control
 
 If you run CO2, set **DC 6 Role** to **CO2** in Settings, then set the **CO2 Schedule On** and **CO2 Schedule Off** times in the CO2 & Cooling section. CO2 is usually timed to come on shortly before the lights and off shortly before they go out.
+
+### Maintenance mode
+
+Switch on **Maintenance Mode** (in the Maintenance section near the top of the page) while you work on the tank. While it is on:
+
+- Each mains outlet, CO2 and the cooling fan follows its **Action During Maintenance Mode** setting: **On**, **Off**, or **No Change** (keeps its normal schedule or thermostat control). CO2 and the fan settings only apply when DC 6 and DC 5 are set to those roles.
+- Automatic top-ups are suspended.
+- Water changes wait. One that was already running stops its pumps and carries on from where it left off when you switch maintenance off. One that is scheduled or started during maintenance waits until then too.
+- Dosing pumps are not affected and dose as normal.
+
+Maintenance Mode stays on after a power cut, so equipment you switched off does not come back on by surprise. Remember to switch it off when you are finished.
 
 ---
 
