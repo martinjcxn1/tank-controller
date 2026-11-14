@@ -128,18 +128,19 @@ The control panel is divided into sections. Each one groups related settings tog
 | Section | What it covers |
 |---|---|
 | Status & Sensors | Live readings: time, temperature, leak, floats, top-up level |
+| Maintenance | The Maintenance Mode switch |
 | Temperature Control | The thermostat — heating and cooling |
 | Water Change Settings | How a water change runs, plus manual start/stop buttons |
 | Water Change Schedule | Which days and what time water changes happen |
 | ATO | Automatic top-up of evaporated water |
 | ATO Fill | Scheduled top-up through a solenoid valve |
 | Reservoir Fill | Automatic refilling of your new-water reservoir |
-| DC Outputs | Manual control of the low-voltage outputs |
-| AC Outputs | Mains outlet schedules and manual control |
 | CO2 & Cooling | CO2 on/off times |
 | Calibration | CO2 bottle weight and scale setup |
 | Doser 3 – Doser 8 | One section per dosing pump — everything for that pump |
-| Settings | Names and roles for every output and float |
+| Settings | Optical level sensor and float roles |
+| AC 1 – AC 4 | One section per mains outlet: on/off switch, label, mode, schedule, WC Action and Maintenance Action |
+| DC 3 – DC 8 | One section per low-voltage output: on/off switch, label, role, WC Action and Maintenance Action (where available) |
 
 ### Buttons you will see everywhere
 
@@ -180,7 +181,7 @@ Adjust them on the thermostat card. They move in 0.5 °C steps, and there is a b
 
 ### Connecting your heater
 
-Heating works through the mains outlets. Go to the **Settings** section, find the outlet your heater is plugged into, and set its Mode to **Heater**. You can set more than one outlet to Heater if you run two heaters.
+Heating works through the mains outlets. Go to the section for the outlet your heater is plugged into (AC 1 – AC 4) and set its Mode to **Heater**. You can set more than one outlet to Heater if you run two heaters.
 
 ### Connecting your cooling fan
 
@@ -243,7 +244,7 @@ If your top-up water is gravity-fed through a valve rather than pumped, output D
 
 Switch **Scheduled ATO Fill** on, choose an **ATO Fill Time**, and set an **ATO Fill Max Runtime**. Filling stops when Float 1 reports the level is reached, or when the maximum runtime expires.
 
-Before it will run, **DC 8 Role** must be set to **ATO Fill** and **Float 1 Role** to **ATO Full**, both in the Settings section. Start Now, Stop, Continue and Cancel work as described in section 4.
+Before it will run, **DC 8 Role** must be set to **ATO Fill** and **Float 1 Role** to **ATO Full**, in the DC 8 section and the Settings section. Start Now, Stop, Continue and Cancel work as described in section 4.
 
 ---
 
@@ -305,9 +306,17 @@ Drain Only and Fill Only are useful for topping off after maintenance, or for em
 
 Shows the current stage and progress, for example `draining: 45 / 300 s`, `waiting to fill: 12 s left`, or `filling: 88 / 495 s`. If a change has paused it explains why — for example `paused: leak detected` or `paused: reservoir empty (float 1)`. During Maintenance Mode it shows `waiting: maintenance mode`.
 
-### Turning equipment off during a change
+### Equipment during a water change
 
-Return pumps and skimmers usually should not run while the water level is low. In the AC Outputs and DC Outputs sections, switch on **Off During WC** for any equipment that must pause. It switches off for the whole water change and comes back on automatically afterwards.
+Return pumps and skimmers usually should not run while the water level is low. Each outlet's own section (AC 1 – AC 4, DC 6 and DC 8) has a **WC Action** that decides what that equipment does for the whole water change:
+
+| WC Action | During a water change |
+|---|---|
+| On | Forced on |
+| Off | Forced off |
+| No Change | Carries on as normal (its mode, schedule or thermostat) |
+
+When the change finishes, everything goes back to normal by itself. DC 6 can only be forced on while it is set to CO2, so a dosing pump is never switched on by accident. DC 8 offers only Off or No Change, because forcing a doser or the ATO Fill valve on could overfill something.
 
 This is available for all four mains outlets, and for DC 6 and DC 8.
 
@@ -322,7 +331,7 @@ If your new-water reservoir is plumbed to a supply, the controller can refill it
 Before this can run, three things must be true:
 
 1. **Float 2 Role** is set to **Reservoir Full** (in Settings).
-2. **DC 4 Role** is set to **Refill Solenoid** (in Settings).
+2. **DC 4 Role** is set to **Refill Solenoid** (in the DC 4 section).
 3. No leak is detected.
 
 Then set a **Reservoir Fill Time**, a **Reservoir Fill Max Runtime**, and switch **Scheduled Reservoir Fill** on. Filling stops as soon as the float says the reservoir is full, or when the maximum runtime is reached — whichever comes first.
@@ -365,7 +374,7 @@ A disconnected or failed float also reads OFF, which the controller treats the s
 
 Up to six outputs can act as dosing pumps. Each has its own section — **Doser 3** through **Doser 8** — containing everything for that pump: its schedule, volume, buttons, calibration rate and flush time.
 
-At the top of each section is the pump's name, taken from its label in Settings. If that output is currently set to do something else, the name reads **"Not in Use"** and the dosing buttons in that section will not run.
+At the top of each section is the pump's name, taken from its label in that output's DC section. If that output is currently set to do something else, the name reads **"Not in Use"** and the dosing buttons in that section will not run.
 
 ### Calibrating a dosing pump
 
@@ -391,13 +400,13 @@ The controller works out the run time itself. Each pump doses once per day, and 
 - **Stop Now** — stops that pump straight away.
 - **Flush/Run** — runs the pump for a fixed number of seconds. Use for priming new tubing or calibrating.
 
-> **Note** — Outputs DC 4 to DC 8 can each be a doser or something else. Their dosing buttons only work when that output's Role is set to Doser — otherwise the section heading reads "Not in Use". Roles are set in the Settings section.
+> **Note** — Outputs DC 4 to DC 8 can each be a doser or something else. Their dosing buttons only work when that output's Role is set to Doser — otherwise the section heading reads "Not in Use". Roles are set in each output's own DC section.
 
 ---
 
 ## 11. Mains Outlets
 
-Each of the four mains outlets has a **Mode**, set in the Settings section at the bottom of the page.
+Each of the four mains outlets has a **Mode**, set in that outlet's own section (AC 1 – AC 4) near the bottom of the page.
 
 | Mode | Behaviour |
 |---|---|
@@ -405,14 +414,17 @@ Each of the four mains outlets has a **Mode**, set in the Settings section at th
 | Always On | Outlet stays on |
 | Scheduled | Outlet switches on and off at the times you set |
 | Heater | Outlet is controlled by the thermostat |
+| Manual | Outlet stays however you last set it with its on/off switch |
 
-For Scheduled mode, set the **Schedule On** and **Schedule Off** times for that outlet in the AC Outputs section. Schedules that run overnight are handled correctly — for example on at 20:00 and off at 06:00.
+In Manual mode, turn the outlet on or off with its switch (for example AC_1) and it stays that way. The choice is remembered through a power cut, although a change made less than about a minute before the power fails may be lost. A water change or maintenance mode can still override a Manual outlet through its WC Action or Maintenance Action; when that ends, the outlet goes back to how you left it.
 
-You can rename each outlet using its **Label** box in Settings, so "AC 1" becomes "Display Lights".
+For Scheduled mode, set the **Schedule On** and **Schedule Off** times in that outlet's section. Schedules that run overnight are handled correctly — for example on at 20:00 and off at 06:00.
+
+You can rename each outlet using its **Label** box in its section, so "AC 1" becomes "Display Lights".
 
 ### CO2 control
 
-If you run CO2, set **DC 6 Role** to **CO2** in Settings, then set the **CO2 Schedule On** and **CO2 Schedule Off** times in the CO2 & Cooling section. CO2 is usually timed to come on shortly before the lights and off shortly before they go out.
+If you run CO2, set **DC 6 Role** to **CO2** in the DC 6 section, then set the **CO2 Schedule On** and **CO2 Schedule Off** times in the CO2 & Cooling section. CO2 is usually timed to come on shortly before the lights and off shortly before they go out.
 
 ### CO2 remaining
 
@@ -428,7 +440,7 @@ Press **Store Full CO2 Weight** again every time you fit a refilled bottle. The 
 
 Switch on **Maintenance Mode** (in the Maintenance section near the top of the page) while you work on the tank. While it is on:
 
-- Each mains outlet, CO2 and the cooling fan follows its **Action During Maintenance Mode** setting: **On**, **Off**, or **No Change** (keeps its normal schedule or thermostat control). CO2 and the fan settings only apply when DC 6 and DC 5 are set to those roles.
+- Each mains outlet, CO2 and the cooling fan follows its **Maintenance Action** setting, found in that outlet's own section (AC 1 – AC 4, DC 5 for the fan, DC 6 for CO2): **On**, **Off**, or **No Change** (keeps its normal schedule or thermostat control). CO2 and the fan settings only apply when DC 6 and DC 5 are set to those roles.
 - Automatic top-ups are suspended.
 - Water changes wait. One that was already running stops its pumps and carries on from where it left off when you switch maintenance off. One that is scheduled or started during maintenance waits until then too.
 - Dosing pumps are not affected and dose as normal.
@@ -439,7 +451,7 @@ Maintenance Mode stays on after a power cut, so equipment you switched off does 
 
 ## 12. Settings
 
-The Settings section sits at the very bottom of the page. It holds the names and roles for every output and float — the things you set once during installation and rarely touch again.
+The Settings section holds the optical level sensor switch and the float roles. Below it, each mains outlet (AC 1 – AC 4) and low-voltage output (DC 3 – DC 8) has its own section holding everything for that output: its on/off switch, label, mode or role, schedule, WC Action and Maintenance Action. These are the things you set once during installation and rarely touch again.
 
 ### Firmware updates
 
@@ -459,7 +471,7 @@ Every output has a **Label**. Changing it renames that output throughout the con
 
 ### Mains outlet modes
 
-AC 1 to AC 4 each have a **Mode** — Off, Always On, Scheduled or Heater. See section 11.
+AC 1 to AC 4 each have a **Mode** — Off, Always On, Scheduled, Heater or Manual. See section 11.
 
 ### Output roles
 
