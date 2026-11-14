@@ -412,6 +412,16 @@ You can rename each outlet using its **Label** box in Settings, so "AC 1" become
 
 If you run CO2, set **DC 6 Role** to **CO2** in Settings, then set the **CO2 Schedule On** and **CO2 Schedule Off** times in the CO2 & Cooling section. CO2 is usually timed to come on shortly before the lights and off shortly before they go out.
 
+### CO2 remaining
+
+The controller can show how much CO2 is left in the bottle, as **CO2 Remaining** (%) in the CO2 & Cooling section. To set it up:
+
+1. Calibrate the scale first (see Calibration), so **CO2 Weight** reads in grams.
+2. Set **CO2 Gas Weight** to the weight of CO2 in a full bottle, as printed on the bottle or refill receipt. For a 2 kg bottle, enter 2000.
+3. With a freshly filled bottle fitted (regulator and all), press **Store Full CO2 Weight**. The saved value is shown as **CO2 Full Weight**.
+
+Press **Store Full CO2 Weight** again every time you fit a refilled bottle. The percentage is worked out as `100 − (Full Weight − Current Weight) ÷ Gas Weight × 100` and kept between 0% and 100%. It is averaged over a few minutes, so it takes a little while to settle after the button is pressed. It stays blank until a full weight has been stored.
+
 ### Maintenance mode
 
 Switch on **Maintenance Mode** (in the Maintenance section near the top of the page) while you work on the tank. While it is on:
