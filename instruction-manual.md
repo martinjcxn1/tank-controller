@@ -52,6 +52,8 @@ Your installer or supplier will normally have connected everything for you. This
 
 Four switched mains outlets. Typical use: a heater, the display lights, a return pump and a skimmer. Each outlet can be named and given its own schedule.
 
+> **AC 2 and AC 4 run by default** — These two outlets are wired so their equipment runs whenever the controller is not actively switching it off. Use them for equipment that should keep running if the controller fails, such as a return pump. The controller still switches them on and off normally, and On in the control panel always means the equipment is running. They start out set to **Always On**. If the controller is restarting, being updated, has crashed or has lost power, equipment on AC 2 and AC 4 **keeps running**, while AC 1 and AC 3 switch off. Do not put anything on AC 2 or AC 4 that would be unsafe to leave running unattended.
+
 ### Low-voltage outputs (DC 1 – DC 8)
 
 | Output | Normally used for | Can be changed? |
@@ -522,7 +524,7 @@ Recalibrate that pump using the steps in section 10. Tubing stiffens with age an
 
 ### After a power cut
 
-The controller restarts by itself and reconnects to your WiFi. All your settings are kept. If a water change was running when the power failed, it restarts in a paused state so the tank is never left part-drained without you knowing — check Water Change Status and press Continue or Cancel.
+The controller restarts by itself and reconnects to your WiFi. All your settings are kept. Equipment on AC 2 and AC 4 keeps running while it restarts. If a water change was running when the power failed, it restarts in a paused state so the tank is never left part-drained without you knowing — check Water Change Status and press Continue or Cancel.
 
 > **Leak detected** — If the leak detector triggers, the controller stops all water movement immediately and refuses to start new water changes or top-ups. Find and fix the leak, dry the sensor, then press Continue on whichever process was interrupted.
 
