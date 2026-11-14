@@ -227,6 +227,12 @@ globals:
     type: float
     restore_value: true
     initial_value: '50535'
+  # CO2 bottle weight (g) saved by "Store Full CO2 Weight" when a freshly filled
+  # bottle is fitted. Includes regulator/mount. 0 = never stored.
+  - id: co2_full_g
+    type: float
+    restore_value: true
+    initial_value: '0'
   - id: hx_scale
     type: float
     restore_value: true
@@ -438,6 +444,20 @@ number:
     max_value: 1800
     step: 5
     unit_of_measurement: s
+    mode: box
+  # Weight of the CO2 charge in a full bottle (as printed on the bottle or the
+  # refill receipt, e.g. 2000 for a 2 kg bottle). Used for CO2 Remaining.
+  - platform: template
+    id: co2_gas_weight
+    name: "CO2 Gas Weight"
+    web_server: {sorting_group_id: grp_co2, sorting_weight: 20}
+    optimistic: true
+    restore_value: true
+    initial_value: 2000
+    min_value: 1
+    max_value: 6000
+    step: 1
+    unit_of_measurement: g
     mode: box
   - platform: template
     id: cal_known_weight
@@ -1401,6 +1421,19 @@ button:
                   - update.perform: {id: fw_update}
                 else:
                   - logger.log: "No firmware update available (already up to date)."
+  # Press after fitting a freshly filled CO2 bottle: stores the current scale
+  # reading (bottle + hardware) as the full weight for CO2 Remaining.
+  - platform: template
+    name: "Store Full CO2 Weight"
+    web_server: {sorting_group_id: grp_co2, sorting_weight: 30}
+    on_press:
+      - lambda: |-
+          float w = id(co2_weight).state;
+          if (isnan(w)) { ESP_LOGW("co2", "Full weight not stored: no scale reading"); return; }
+          id(co2_full_g) = w;
+          ESP_LOGI("co2", "Full CO2 weight stored: %.0f g", w);
+          id(co2_full_weight).update();
+          id(co2_remaining).update();
   - platform: template
     name: "CO2 Cal: Tare (Zero)"
     web_server: {sorting_group_id: grp_calibration, sorting_weight: 30}
@@ -2136,6 +2169,41 @@ sensor:
       float raw = id(co2_raw).state;
       if (isnan(raw)) return NAN;
       return (raw - id(hx_offset)) / id(hx_scale);
+  # Read-only: the full bottle weight last saved by "Store Full CO2 Weight".
+  - platform: template
+    id: co2_full_weight
+    name: "CO2 Full Weight"
+    web_server: {sorting_group_id: grp_co2, sorting_weight: 40}
+    unit_of_measurement: g
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: |-
+      return id(co2_full_g) > 0 ? id(co2_full_g) : NAN;
+  # CO2 left as a % of a full charge. Empty bottle weight E = Full - Gas, so
+  #   % = (Current - (Full - Gas)) / Gas * 100 = 100 - (Full - Current) / Gas * 100
+  # clamped to 0–100. Unknown until a full weight is stored or with no reading.
+  # Averaged over ~3 min so load-cell drift doesn't make it jitter.
+  - platform: template
+    id: co2_remaining
+    name: "CO2 Remaining"
+    web_server: {sorting_group_id: grp_co2, sorting_weight: 50}
+    unit_of_measurement: "%"
+    icon: "mdi:gas-cylinder"
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: |-
+      float c = id(co2_weight).state;
+      float f = id(co2_full_g);
+      float g = id(co2_gas_weight).state;
+      if (isnan(c) || f <= 0 || isnan(g) || g <= 0) return NAN;
+      float pct = 100.0f - (f - c) / g * 100.0f;
+      if (pct > 100.0f) pct = 100.0f;
+      if (pct < 0.0f)   pct = 0.0f;
+      return pct;
+    filters:
+      - sliding_window_moving_average:
+          window_size: 6
+          send_every: 1
   # Read-only: max fill time = fill_ratio * drain_seconds * 1.1 (flood safety cap)
   - platform: template
     id: wc_max_fill_time
